@@ -12,7 +12,9 @@ pub mod results;
 pub mod runner;
 
 pub use discovery::{TestDefinitionFile, TestDiscovery};
-pub use execution::{ExecutionContext, TestExecutor};
+pub use execution::{
+    ExecutionContext, ScriptTestRunner, TestExecutor, TestFn, TestOutput, TestRegistry,
+};
 pub use fixtures::{FixtureContext, FixtureDef, FixtureRegistry, FixtureScope};
 pub use results::{TestSuite, TestSummary};
 pub use runner::{RunConfig, SonicTestRunner};

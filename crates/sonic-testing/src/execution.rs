@@ -3,11 +3,18 @@
 //! Provides single-test and batch execution with parallel scheduling via
 //! tokio, crash detection for common kernel/OOM/segfault patterns, and
 //! device recovery helpers.
+//!
+//! Tests are dispatched at runtime through a [`TestRegistry`] that maps test
+//! IDs to async function implementations, or through a [`ScriptTestRunner`]
+//! that invokes external scripts (Python, shell) when no registered
+//! implementation is found.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -22,6 +29,251 @@ use crate::fixtures::{
     FixtureContext, FixtureRegistry, resolve_fixtures, setup_fixtures,
     teardown_fixtures,
 };
+
+// ---------------------------------------------------------------------------
+// TestOutput
+// ---------------------------------------------------------------------------
+
+/// Output produced by a test function execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestOutput {
+    /// Whether the test passed.
+    pub passed: bool,
+    /// Optional human-readable message describing the outcome.
+    pub message: Option<String>,
+    /// Captured standard output from the test.
+    pub stdout: Option<String>,
+    /// Captured standard error from the test.
+    pub stderr: Option<String>,
+}
+
+impl TestOutput {
+    /// Creates a passing test output with no captured I/O.
+    pub fn pass() -> Self {
+        Self {
+            passed: true,
+            message: None,
+            stdout: None,
+            stderr: None,
+        }
+    }
+
+    /// Creates a failing test output with the given message.
+    pub fn fail(message: impl Into<String>) -> Self {
+        Self {
+            passed: false,
+            message: Some(message.into()),
+            stdout: None,
+            stderr: None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TestFn / TestRegistry
+// ---------------------------------------------------------------------------
+
+/// An async test function that receives the execution context and returns a
+/// [`TestOutput`] describing the result.
+pub type TestFn = Arc<
+    dyn Fn(&ExecutionContext) -> Pin<Box<dyn Future<Output = Result<TestOutput>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Registry mapping test IDs (`module::name`) to their implementation functions.
+///
+/// The executor consults this registry at dispatch time. If a test ID is not
+/// found here, the executor falls back to searching for an external script.
+pub struct TestRegistry {
+    tests: HashMap<String, TestFn>,
+}
+
+impl std::fmt::Debug for TestRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TestRegistry")
+            .field("count", &self.tests.len())
+            .finish()
+    }
+}
+
+impl TestRegistry {
+    /// Creates an empty registry.
+    pub fn new() -> Self {
+        Self {
+            tests: HashMap::new(),
+        }
+    }
+
+    /// Registers an async test function under the given ID.
+    pub fn register(&mut self, id: &str, f: TestFn) {
+        self.tests.insert(id.to_owned(), f);
+    }
+
+    /// Convenience method for registering a synchronous test function.
+    ///
+    /// The function is wrapped in an async adapter so it can be stored
+    /// alongside async test functions in the same registry.
+    pub fn register_sync<F>(&mut self, id: &str, f: F)
+    where
+        F: Fn(&ExecutionContext) -> Result<TestOutput> + Send + Sync + 'static,
+    {
+        let f = Arc::new(f);
+        self.tests.insert(
+            id.to_owned(),
+            Arc::new(move |ctx: &ExecutionContext| {
+                let result = f(ctx);
+                Box::pin(async move { result })
+                    as Pin<Box<dyn Future<Output = Result<TestOutput>> + Send>>
+            }),
+        );
+    }
+
+    /// Looks up a test function by ID.
+    pub fn get(&self, id: &str) -> Option<&TestFn> {
+        self.tests.get(id)
+    }
+
+    /// Returns the number of registered tests.
+    pub fn len(&self) -> usize {
+        self.tests.len()
+    }
+
+    /// Returns true if no tests are registered.
+    pub fn is_empty(&self) -> bool {
+        self.tests.is_empty()
+    }
+
+    /// Returns an iterator over all registered test IDs.
+    pub fn ids(&self) -> impl Iterator<Item = &str> {
+        self.tests.keys().map(String::as_str)
+    }
+
+    /// Returns true if the registry contains a test with the given ID.
+    pub fn contains(&self, id: &str) -> bool {
+        self.tests.contains_key(id)
+    }
+}
+
+impl Default for TestRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ScriptTestRunner
+// ---------------------------------------------------------------------------
+
+/// Runs test cases implemented as external scripts or commands.
+///
+/// When a test is defined in TOML but has no registered Rust implementation,
+/// the executor delegates to this runner which invokes the script as a child
+/// process, captures its output, and maps the exit code to pass/fail.
+pub struct ScriptTestRunner {
+    /// Working directory for script execution.
+    work_dir: PathBuf,
+    /// Environment variables passed to the script process.
+    env: HashMap<String, String>,
+}
+
+impl ScriptTestRunner {
+    /// Creates a new script runner with the given working directory.
+    pub fn new(work_dir: PathBuf) -> Self {
+        Self {
+            work_dir,
+            env: HashMap::new(),
+        }
+    }
+
+    /// Adds an environment variable to be passed to scripts.
+    pub fn with_env(mut self, key: &str, value: &str) -> Self {
+        self.env.insert(key.to_owned(), value.to_owned());
+        self
+    }
+
+    /// Runs a script at `script_path` with the given arguments and timeout.
+    ///
+    /// Exit code 0 is mapped to a passing result. Any other exit code or a
+    /// timeout produces a failure. Stdout and stderr are always captured.
+    pub async fn run_script(
+        &self,
+        script_path: &Path,
+        args: &[&str],
+        timeout: Duration,
+    ) -> Result<TestOutput> {
+        info!(
+            script = %script_path.display(),
+            work_dir = %self.work_dir.display(),
+            "running test script"
+        );
+
+        let mut cmd = tokio::process::Command::new(script_path);
+        cmd.args(args)
+            .current_dir(&self.work_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        for (k, v) in &self.env {
+            cmd.env(k, v);
+        }
+
+        let child = cmd.spawn().map_err(|e| {
+            SonicError::Test(format!(
+                "failed to spawn script `{}`: {e}",
+                script_path.display()
+            ))
+        })?;
+
+        let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                return Err(SonicError::Test(format!(
+                    "script `{}` I/O error: {e}",
+                    script_path.display()
+                )));
+            }
+            Err(_) => {
+                return Ok(TestOutput {
+                    passed: false,
+                    message: Some(format!(
+                        "script `{}` timed out after {}s",
+                        script_path.display(),
+                        timeout.as_secs()
+                    )),
+                    stdout: None,
+                    stderr: None,
+                });
+            }
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let passed = output.status.success();
+
+        Ok(TestOutput {
+            passed,
+            message: if passed {
+                None
+            } else {
+                Some(format!(
+                    "script exited with code {}",
+                    output.status.code().unwrap_or(-1)
+                ))
+            },
+            stdout: if stdout.is_empty() {
+                None
+            } else {
+                Some(stdout)
+            },
+            stderr: if stderr.is_empty() {
+                None
+            } else {
+                Some(stderr)
+            },
+        })
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ExecutionContext
@@ -45,6 +297,9 @@ pub struct ExecutionContext {
     /// Fixture registry for resolving fixture dependencies.
     pub fixture_registry: FixtureRegistry,
 
+    /// Registry of test function implementations.
+    pub test_registry: Arc<TestRegistry>,
+
     /// Environment variables passed to tests.
     pub env_vars: HashMap<String, String>,
 
@@ -53,7 +308,7 @@ pub struct ExecutionContext {
 }
 
 impl ExecutionContext {
-    /// Creates a new execution context.
+    /// Creates a new execution context with an empty test registry.
     pub fn new(testbed_name: impl Into<String>) -> Self {
         let name = testbed_name.into();
         Self {
@@ -62,6 +317,7 @@ impl ExecutionContext {
             topology: None,
             fixture_context: FixtureContext::new(name),
             fixture_registry: FixtureRegistry::new(),
+            test_registry: Arc::new(TestRegistry::new()),
             env_vars: HashMap::new(),
             output_dir: PathBuf::from("output"),
         }
@@ -70,6 +326,12 @@ impl ExecutionContext {
     /// Sets the output directory.
     pub fn with_output_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.output_dir = dir.into();
+        self
+    }
+
+    /// Sets the test registry.
+    pub fn with_registry(mut self, registry: Arc<TestRegistry>) -> Self {
+        self.test_registry = registry;
         self
     }
 }
@@ -243,13 +505,33 @@ pub async fn execute_test(
     }
 
     // 2. Run the test with timeout.
-    let timeout = std::time::Duration::from_secs(case.timeout_secs);
+    let timeout = Duration::from_secs(case.timeout_secs);
     let result = tokio::time::timeout(timeout, run_test_body(case, context)).await;
 
-    let outcome = match result {
-        Ok(Ok(())) => {
-            debug!(test = %case.name, "test passed");
-            TestOutcome::Passed
+    let (outcome, message, stdout, stderr) = match result {
+        Ok(Ok(output)) => {
+            if output.passed {
+                debug!(test = %case.name, "test passed");
+                (TestOutcome::Passed, output.message, output.stdout, output.stderr)
+            } else {
+                let msg = output
+                    .message
+                    .unwrap_or_else(|| "test reported failure".to_owned());
+                warn!(test = %case.name, error = %msg, "test failed");
+                let finished_at = Utc::now();
+                let duration = wall_start.elapsed();
+                let _ = teardown_fixtures(&mut context.fixture_context, &fixtures);
+                return TestCaseResult {
+                    test_case: case.clone(),
+                    outcome: TestOutcome::Failed,
+                    duration,
+                    message: Some(msg),
+                    stdout: output.stdout,
+                    stderr: output.stderr,
+                    started_at,
+                    finished_at,
+                };
+            }
         }
         Ok(Err(e)) => {
             warn!(test = %case.name, error = %e, "test failed");
@@ -308,25 +590,29 @@ pub async fn execute_test(
         test_case: case.clone(),
         outcome,
         duration,
-        message: None,
-        stdout: None,
-        stderr: None,
+        message,
+        stdout,
+        stderr,
         started_at,
         finished_at,
     }
 }
 
-/// The actual test body.  In a real implementation this would invoke the
-/// test function through a dynamic dispatch mechanism.  Here we execute a
-/// placeholder that validates the test context.
-async fn run_test_body(case: &TestCase, context: &ExecutionContext) -> Result<()> {
+/// Dispatches a test case to its implementation.
+///
+/// Resolution order:
+/// 1. Look up the test by `case.id` in `context.test_registry`.
+/// 2. Search for a script at `{output_dir}/../tests/{module}/test_{name}.py`
+///    or `.sh`.
+/// 3. Return an error if no implementation is found.
+async fn run_test_body(case: &TestCase, context: &ExecutionContext) -> Result<TestOutput> {
     trace!(
         test = %case.name,
         testbed = %context.testbed_name,
         "running test body"
     );
 
-    // Check that the DUT is available (at least one configured).
+    // Check that at least one DUT is configured.
     if context.dut_info.is_empty() {
         return Err(SonicError::Test(format!(
             "test `{}` requires at least one DUT but none configured",
@@ -334,10 +620,50 @@ async fn run_test_body(case: &TestCase, context: &ExecutionContext) -> Result<()
         )));
     }
 
-    // Simulate test execution -- in a real system this invokes compiled test
-    // code via function pointer or trait object.
-    trace!(test = %case.name, "test body completed");
-    Ok(())
+    // 1. Try the registry.
+    if let Some(test_fn) = context.test_registry.get(&case.id) {
+        debug!(test = %case.id, "dispatching via test registry");
+        return test_fn(context).await;
+    }
+
+    // 2. Try external script discovery.
+    let tests_dir = context.output_dir.join("..").join("tests").join(&case.module);
+    let script_base = format!("test_{}", case.name);
+
+    for ext in &["py", "sh"] {
+        let script_path = tests_dir.join(format!("{script_base}.{ext}"));
+        if script_path.exists() {
+            debug!(
+                test = %case.id,
+                script = %script_path.display(),
+                "dispatching via script runner"
+            );
+
+            let dut_hostnames: Vec<&str> =
+                context.dut_info.iter().map(|d| d.hostname.as_str()).collect();
+
+            let mut runner = ScriptTestRunner::new(
+                script_path.parent().unwrap_or(Path::new(".")).to_owned(),
+            )
+            .with_env("SONIC_TESTBED", &context.testbed_name)
+            .with_env("SONIC_DUT_HOSTNAMES", &dut_hostnames.join(","))
+            .with_env("SONIC_TEST_NAME", &case.name)
+            .with_env("SONIC_TEST_MODULE", &case.module);
+
+            if let Some(ref topo) = context.topology {
+                runner = runner.with_env("SONIC_TOPOLOGY", &topo.to_string());
+            }
+
+            let timeout = Duration::from_secs(case.timeout_secs);
+            return runner.run_script(&script_path, &[], timeout).await;
+        }
+    }
+
+    // 3. No implementation found.
+    Err(SonicError::Test(format!(
+        "no implementation found for test `{}`; register it in the TestRegistry or provide a script",
+        case.id
+    )))
 }
 
 /// Helper to create an error result.
@@ -534,11 +860,13 @@ pub fn detect_crash(device: &DeviceInfo, output: &str) -> bool {
 ///
 /// The recovery sequence:
 /// 1. Wait a brief period for any pending I/O to settle.
-/// 2. Attempt a cold reboot via the management interface.
-/// 3. Wait for the device to become reachable.
-/// 4. Reload the running configuration.
+/// 2. Log the intent to reboot (actual SSH-based reboot requires
+///    `sonic_device`, which cannot be imported here).
+/// 3. Poll the device management port with TCP connect probes until it
+///    becomes reachable or the timeout expires.
 ///
-/// Returns `Ok(())` if recovery succeeds, or an error describing the failure.
+/// Returns `Ok(())` if the device becomes reachable, or an error describing
+/// the failure.
 pub async fn attempt_recovery(device: &DeviceInfo) -> Result<()> {
     info!(
         device = %device.hostname,
@@ -547,39 +875,44 @@ pub async fn attempt_recovery(device: &DeviceInfo) -> Result<()> {
     );
 
     // Step 1: Brief settle time.
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
-    // Step 2: Attempt reboot.
-    // In a real implementation this would call device.reboot(RebootType::Cold).
-    // Here we log the intent and simulate success.
+    // Step 2: Log reboot intent. A full implementation would SSH in and run
+    // `sudo reboot`, but the dependency graph does not allow importing
+    // sonic_device from this crate.
     info!(
         device = %device.hostname,
         "issuing cold reboot for recovery"
     );
 
-    // Step 3: Wait for device to become reachable.
-    let max_wait = std::time::Duration::from_secs(300);
-    let poll_interval = std::time::Duration::from_secs(10);
+    // Step 3: Poll the management port with TCP connect probes.
+    let max_wait = Duration::from_secs(300);
+    let poll_interval = Duration::from_secs(10);
     let start = Instant::now();
+    let addr = std::net::SocketAddr::new(device.mgmt_ip, device.port);
 
     while start.elapsed() < max_wait {
-        // In a real implementation, this would attempt an SSH/ping check.
-        // We simulate the wait loop structure.
         debug!(
             device = %device.hostname,
             elapsed_secs = start.elapsed().as_secs(),
-            "waiting for device to become reachable"
+            %addr,
+            "probing device management port"
         );
 
-        tokio::time::sleep(poll_interval).await;
-
-        // Simulate: device comes back after initial wait.
-        if start.elapsed().as_secs() >= 30 {
-            info!(
-                device = %device.hostname,
-                "device reachable after recovery"
-            );
-            return Ok(());
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::net::TcpStream::connect(addr),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                info!(device = %device.hostname, "device reachable after recovery");
+                return Ok(());
+            }
+            _ => {
+                tokio::time::sleep(poll_interval).await;
+                continue;
+            }
         }
     }
 
@@ -617,6 +950,8 @@ mod tests {
         }
     }
 
+    // -- crash detection tests (unchanged) --
+
     #[test]
     fn detect_crash_finds_kernel_panic() {
         let device = sample_device();
@@ -643,6 +978,8 @@ mod tests {
         assert!(!detect_crash(&device, output));
     }
 
+    // -- execution tests --
+
     #[tokio::test]
     async fn execute_test_returns_error_when_no_dut() {
         let case = sample_case();
@@ -660,6 +997,14 @@ mod tests {
         let case = sample_case();
         let mut ctx = ExecutionContext::new("test-tb");
         ctx.dut_info.push(sample_device());
+
+        // Register a passing implementation for this test ID.
+        let mut registry = TestRegistry::new();
+        registry.register_sync("bgp::test_convergence", |_ctx| {
+            Ok(TestOutput::pass())
+        });
+        ctx.test_registry = Arc::new(registry);
+
         let result = execute_test(&case, &mut ctx).await;
         assert_eq!(result.outcome, TestOutcome::Passed);
     }
@@ -674,5 +1019,130 @@ mod tests {
         let results = execute_batch(&exec, &cases, &ctx).await;
         assert!(results.iter().all(|r| r.outcome == TestOutcome::Skipped));
         drop(cancel_tx);
+    }
+
+    // -- TestRegistry tests --
+
+    #[test]
+    fn registry_register_and_lookup() {
+        let mut registry = TestRegistry::new();
+        assert!(registry.is_empty());
+        assert_eq!(registry.len(), 0);
+
+        registry.register_sync("mod::test_a", |_ctx| Ok(TestOutput::pass()));
+        registry.register_sync("mod::test_b", |_ctx| {
+            Ok(TestOutput::fail("oops"))
+        });
+
+        assert_eq!(registry.len(), 2);
+        assert!(registry.contains("mod::test_a"));
+        assert!(registry.contains("mod::test_b"));
+        assert!(!registry.contains("mod::test_c"));
+
+        let ids: Vec<&str> = registry.ids().collect();
+        assert!(ids.contains(&"mod::test_a"));
+        assert!(ids.contains(&"mod::test_b"));
+    }
+
+    // -- ScriptTestRunner tests --
+
+    #[tokio::test]
+    async fn script_runner_executes_echo_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("test_echo.sh");
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\necho hello from script\nexit 0\n",
+        )
+        .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &script_path,
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        let runner = ScriptTestRunner::new(dir.path().to_owned());
+        let output = runner
+            .run_script(&script_path, &[], Duration::from_secs(10))
+            .await
+            .unwrap();
+
+        assert!(output.passed);
+        assert!(output.stdout.as_deref().unwrap().contains("hello from script"));
+    }
+
+    #[tokio::test]
+    async fn script_runner_captures_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("test_fail.sh");
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\necho bad >&2\nexit 1\n",
+        )
+        .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &script_path,
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        let runner = ScriptTestRunner::new(dir.path().to_owned());
+        let output = runner
+            .run_script(&script_path, &[], Duration::from_secs(10))
+            .await
+            .unwrap();
+
+        assert!(!output.passed);
+        assert!(output.stderr.as_deref().unwrap().contains("bad"));
+    }
+
+    // -- run_test_body dispatch tests --
+
+    #[tokio::test]
+    async fn run_test_body_errors_when_no_implementation() {
+        let case = sample_case();
+        let mut ctx = ExecutionContext::new("test-tb");
+        ctx.dut_info.push(sample_device());
+
+        let result = run_test_body(&case, &ctx).await;
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no implementation found"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_test_propagates_stdout_stderr() {
+        let case = sample_case();
+        let mut ctx = ExecutionContext::new("test-tb");
+        ctx.dut_info.push(sample_device());
+
+        let mut registry = TestRegistry::new();
+        registry.register_sync("bgp::test_convergence", |_ctx| {
+            Ok(TestOutput {
+                passed: true,
+                message: None,
+                stdout: Some("collected output".to_owned()),
+                stderr: Some("debug info".to_owned()),
+            })
+        });
+        ctx.test_registry = Arc::new(registry);
+
+        let result = execute_test(&case, &mut ctx).await;
+        assert_eq!(result.outcome, TestOutcome::Passed);
+        assert_eq!(result.stdout.as_deref(), Some("collected output"));
+        assert_eq!(result.stderr.as_deref(), Some("debug info"));
     }
 }
