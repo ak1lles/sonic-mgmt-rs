@@ -70,7 +70,7 @@ Handles all configuration file loading, validation, merging, and serialization. 
 
 **Config sections:**
 - `AppConfig` -- root, with testbed, connection, testing, reporting, topology, and logging sections
-- `TestbedConfig` -- testbed definitions with DUTs, neighbors, PTF, and metadata
+- `TestbedConfig` -- testbed definitions with DUTs, fanout switches, connection graph, neighbors, PTF, and metadata
 - `InventoryConfig` -- device catalog with credentials, connection info, and grouping
 
 ---
@@ -111,7 +111,8 @@ Manages the full testbed lifecycle.
 
 **Capabilities:**
 - Deploy and teardown topologies
-- Concurrent health checks across all devices
+- Concurrent health checks across all devices (DUTs, fanouts, PTF)
+- Connection graph queries (DUT port to fanout port to PTF interface)
 - Config deployment (minigraph, config_db)
 - Testbed recovery operations
 - SONiC image upgrade

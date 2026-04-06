@@ -1,9 +1,19 @@
 ---
 title: Testbed Configuration
-description: How to define testbeds with DUTs, topology, PTF, and neighbor VMs
+description: Define testbeds with DUTs, fanout switches, connection graphs, and neighbor VMs
 ---
 
-A **testbed** defines the complete test environment: which devices are under test, what topology they're wired in, and the supporting infrastructure (PTF containers, neighbor VMs, physical servers).
+A testbed defines the complete test environment: devices under test, the fanout switches that wire them to the tester, the physical port mapping, and supporting infrastructure like PTF containers and neighbor VMs.
+
+## Physical Topology
+
+A standard SONiC testbed has three layers connected through a management network:
+
+```
+Tester Server (PTF)  <-->  Fanout Switch  <-->  DUT (SONiC)
+```
+
+The tester server runs PTF containers that inject and capture data-plane packets. The fanout switch uses VLANs to map individual tester ports to DUT front-panel ports. The DUT is the SONiC switch under test.
 
 ## File Format
 
@@ -18,7 +28,6 @@ file   = "config/testbed.toml"
 ## Full Example
 
 ```toml
-# Testbed metadata
 name      = "vms-t0"
 group     = "vms"
 topo      = "t0"
@@ -26,9 +35,9 @@ ptf_image = "docker-ptf"
 ptf_ip    = "10.255.0.188"
 server    = "server-1"
 vm_base   = "VM0100"
-comment   = "T0 testbed with two Mellanox DUTs"
+comment   = "T0 testbed with fanout wiring"
 
-# Devices Under Test
+# Device Under Test
 [[duts]]
 hostname = "sonic-dut-1"
 mgmt_ip  = "10.0.0.1"
@@ -39,28 +48,38 @@ platform = "mellanox"
   username = "admin"
   password = "password"
 
-[[duts]]
-hostname = "sonic-dut-2"
-mgmt_ip  = "10.0.0.2"
-hwsku    = "Force10-S6000"
-platform = "broadcom"
+# Fanout switch between tester and DUT
+[[fanouts]]
+hostname = "fanout-1"
+mgmt_ip  = "10.0.1.1"
+platform = "mellanox"
+hwsku    = "MSN2700"
 
-  [duts.credentials]
+  [fanouts.credentials]
   username = "admin"
-  key_path = "/home/user/.ssh/sonic_key"
+  password = "admin"
 
-# Neighbor VMs (optional -- auto-generated from topology if omitted)
-[[neighbors]]
-hostname = "ARISTA01T1"
-vm_type  = "veos"
-mgmt_ip  = "10.250.0.2"
+# Physical wiring: DUT port -> fanout port -> PTF interface
+[[connection_graph]]
+dut_port    = "Ethernet0"
+fanout_host = "fanout-1"
+fanout_port = "Ethernet1"
+ptf_port    = "eth0"
+vlan_id     = 1000
 
-[[neighbors]]
-hostname = "ARISTA02T1"
-vm_type  = "ceos"
-mgmt_ip  = "10.250.0.3"
+[[connection_graph]]
+dut_port    = "Ethernet4"
+fanout_host = "fanout-1"
+fanout_port = "Ethernet2"
+ptf_port    = "eth1"
+vlan_id     = 1001
 
-# Optional metadata
+# Neighbor VMs (optional)
+# [[neighbors]]
+# hostname = "ARISTA01T1"
+# vm_type  = "veos"
+# mgmt_ip  = "10.250.0.2"
+
 [metadata]
 owner   = "sonic-team"
 purpose = "nightly regression"
@@ -73,44 +92,62 @@ purpose = "nightly regression"
 | Field | Required | Description |
 |---|---|---|
 | `name` | Yes | Unique testbed identifier |
-| `group` | Yes | Logical grouping (e.g., `vms`, `physical`, `docker`) |
+| `group` | No | Logical grouping for CI partitioning |
 | `topo` | Yes | Topology type: `t0`, `t1`, `t2`, `dualtor`, `ptf`, etc. |
 | `ptf_image` | No | Docker image for the PTF container |
 | `ptf_ip` | No | Management IP of the PTF container |
-| `server` | Yes | Hostname of the physical server hosting this testbed |
-| `vm_base` | No | Base name for auto-generated VMs (e.g., `VM0100`) |
+| `server` | No | Hostname of the physical server hosting VMs and PTF |
+| `vm_base` | No | Base name for auto-generated VMs (e.g. `VM0100`) |
 | `comment` | No | Human-readable description |
 
 ### DUT Fields (`[[duts]]`)
 
-Each `[[duts]]` entry defines a Device Under Test:
+Each entry defines a device under test.
 
 | Field | Required | Description |
 |---|---|---|
-| `hostname` | Yes | Device hostname (must match inventory if using one) |
+| `hostname` | Yes | Device hostname |
 | `mgmt_ip` | Yes | Management IP address |
-| `hwsku` | Yes | Hardware SKU (e.g., `ACS-MSN2700`, `Force10-S6000`) |
+| `hwsku` | Yes | Hardware SKU (e.g. `ACS-MSN2700`) |
 | `platform` | Yes | Platform: `mellanox`, `broadcom`, `barefoot`, `vs`, etc. |
 | `credentials.username` | Yes | SSH username |
-| `credentials.password` | No | SSH password (use `key_path` for key-based auth) |
+| `credentials.password` | No | SSH password |
 | `credentials.key_path` | No | Path to SSH private key |
+
+### Fanout Fields (`[[fanouts]]`)
+
+Each entry defines a fanout switch in the testbed.
+
+| Field | Required | Description |
+|---|---|---|
+| `hostname` | Yes | Fanout switch hostname |
+| `mgmt_ip` | Yes | Management IP address |
+| `platform` | No | Platform: `mellanox`, `broadcom`, etc. |
+| `hwsku` | No | Hardware SKU |
+| `credentials.username` | Yes | SSH username |
+| `credentials.password` | No | SSH password |
+
+### Connection Graph (`[[connection_graph]]`)
+
+Each entry maps one physical link from a DUT front-panel port through a fanout port to a PTF test interface.
+
+| Field | Required | Description |
+|---|---|---|
+| `dut_port` | Yes | DUT front-panel port (e.g. `Ethernet0`) |
+| `fanout_host` | Yes | Hostname of the fanout carrying this link |
+| `fanout_port` | Yes | Fanout switch port (e.g. `Ethernet1`) |
+| `ptf_port` | No | PTF interface name (e.g. `eth0`) |
+| `vlan_id` | No | VLAN ID used on the fanout for traffic isolation |
+
+The connection graph is validated against the fanout list. Every `fanout_host` referenced in a link must appear in the `[[fanouts]]` section.
 
 ### Neighbor Fields (`[[neighbors]]`)
 
 | Field | Required | Description |
 |---|---|---|
-| `hostname` | Yes | VM hostname (e.g., `ARISTA01T1`) |
+| `hostname` | Yes | VM hostname (e.g. `ARISTA01T1`) |
 | `vm_type` | Yes | VM type: `veos`, `ceos`, `vsonic`, `vcisco`, `csonic` |
-| `mgmt_ip` | Yes | Management IP for the VM |
-
-### Metadata (`[metadata]`)
-
-Arbitrary key-value pairs. Commonly used fields:
-
-| Field | Description |
-|---|---|
-| `owner` | Team or person responsible |
-| `purpose` | What this testbed is used for |
+| `mgmt_ip` | No | Management IP for the VM |
 
 ## Common Topology Choices
 
@@ -120,38 +157,12 @@ Arbitrary key-value pairs. Commonly used fields:
 | `t1` | Testing a spine switch with leaf connections |
 | `t2` | Testing super-spine in 3-tier fabric |
 | `dualtor` | Testing dual top-of-rack redundancy |
-| `ptf` | PTF-only testing (no VMs, just packet injection) |
+| `ptf` | PTF-only testing, no VMs, just packet injection |
 
 ## Creating Testbeds Interactively
 
-The testbed wizard walks you through creating a testbed file step-by-step:
+The testbed wizard walks through creating a testbed file step by step:
 
 ```sh
 sonic-mgmt testbed wizard
-```
-
-## Docker Testbed
-
-For local development with SONiC VS:
-
-```toml
-name  = "docker-vs"
-group = "docker"
-topo  = "ptf"
-
-server = "localhost"
-
-[[duts]]
-hostname = "sonic-vs"
-mgmt_ip  = "127.0.0.1"
-hwsku    = "Force10-S6000"
-platform = "vs"
-
-  [duts.credentials]
-  username = "admin"
-  password = "YourPaSsWoRd"
-
-[metadata]
-owner   = "dev"
-purpose = "docker integration testing"
 ```
