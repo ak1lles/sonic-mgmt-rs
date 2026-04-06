@@ -62,6 +62,14 @@ pub struct TestbedConfig {
     #[serde(default)]
     pub comment: String,
 
+    /// Fanout switch configurations.
+    #[serde(default)]
+    pub fanouts: Vec<FanoutConfig>,
+
+    /// Physical wiring between DUT ports, fanout ports, and PTF interfaces.
+    #[serde(default)]
+    pub connection_graph: Vec<PhysicalLink>,
+
     /// Arbitrary key-value metadata attached to the testbed.
     #[serde(default)]
     pub metadata: HashMap<String, String>,
@@ -114,6 +122,33 @@ impl TestbedConfig {
         // Validate neighbor entries.
         for neighbor in &self.neighbors {
             neighbor.validate(&self.name)?;
+        }
+
+        // Validate fanout entries.
+        let mut seen_fanouts = std::collections::HashSet::new();
+        for fanout in &self.fanouts {
+            if !seen_fanouts.insert(&fanout.hostname) {
+                return Err(SonicError::ConfigValidation {
+                    path: format!("testbed[{}].fanouts", self.name),
+                    reason: format!("duplicate fanout hostname `{}`", fanout.hostname),
+                });
+            }
+            fanout.validate(&self.name)?;
+        }
+
+        // Validate connection graph references.
+        let fanout_names: std::collections::HashSet<&str> =
+            self.fanouts.iter().map(|f| f.hostname.as_str()).collect();
+        for link in &self.connection_graph {
+            if !fanout_names.is_empty() && !fanout_names.contains(link.fanout_host.as_str()) {
+                return Err(SonicError::ConfigValidation {
+                    path: format!("testbed[{}].connection_graph", self.name),
+                    reason: format!(
+                        "link references fanout `{}` which is not defined in fanouts",
+                        link.fanout_host,
+                    ),
+                });
+            }
         }
 
         debug!(testbed = %self.name, "testbed config validation passed");
@@ -257,6 +292,79 @@ impl NeighborConfig {
         }
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// FanoutConfig
+// ---------------------------------------------------------------------------
+
+/// Configuration for a fanout switch in the testbed.
+///
+/// Fanout switches sit between the tester server and the DUT, using VLANs
+/// to map individual tester ports to DUT front-panel ports.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FanoutConfig {
+    /// Hostname of the fanout switch.
+    pub hostname: String,
+
+    /// Management IP address.
+    pub mgmt_ip: IpAddr,
+
+    /// Platform / ASIC vendor.
+    #[serde(default = "default_platform")]
+    pub platform: Platform,
+
+    /// Hardware SKU string.
+    #[serde(default)]
+    pub hwsku: String,
+
+    /// Login credentials.
+    #[serde(default = "default_credentials")]
+    pub credentials: DutCredentials,
+
+    /// Arbitrary per-fanout metadata.
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+}
+
+impl FanoutConfig {
+    fn validate(&self, testbed_name: &str) -> Result<()> {
+        if self.hostname.is_empty() {
+            return Err(SonicError::ConfigValidation {
+                path: format!("testbed[{testbed_name}].fanout.hostname"),
+                reason: "fanout hostname must not be empty".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PhysicalLink (connection graph)
+// ---------------------------------------------------------------------------
+
+/// A single physical link in the connection graph.
+///
+/// Maps one DUT front-panel port through a fanout switch to a PTF
+/// test interface. The fanout uses the VLAN ID to isolate traffic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhysicalLink {
+    /// DUT front-panel port name (e.g. `"Ethernet0"`).
+    pub dut_port: String,
+
+    /// Hostname of the fanout switch carrying this link.
+    pub fanout_host: String,
+
+    /// Fanout switch port name (e.g. `"Ethernet1"`).
+    pub fanout_port: String,
+
+    /// PTF interface name (e.g. `"eth0"`).
+    #[serde(default)]
+    pub ptf_port: String,
+
+    /// VLAN ID used on the fanout for this link.
+    #[serde(default)]
+    pub vlan_id: u16,
 }
 
 // ---------------------------------------------------------------------------
@@ -419,6 +527,8 @@ mod tests {
             vm_base: "VM0100".into(),
             duts: vec![sample_dut()],
             neighbors: vec![],
+            fanouts: vec![],
+            connection_graph: vec![],
             comment: "unit test".into(),
             metadata: HashMap::new(),
         }

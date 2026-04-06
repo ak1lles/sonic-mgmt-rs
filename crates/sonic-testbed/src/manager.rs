@@ -53,6 +53,12 @@ pub struct TestbedConfig {
     pub default_user: Option<String>,
     #[serde(default)]
     pub default_password: Option<String>,
+    /// Fanout switch configurations.
+    #[serde(default)]
+    pub fanouts: Vec<FanoutConfig>,
+    /// Physical link wiring.
+    #[serde(default)]
+    pub connection_graph: Vec<PhysicalLink>,
 }
 
 fn default_topo() -> String {
@@ -83,6 +89,29 @@ fn default_neighbor_type() -> String {
     "eos".to_string()
 }
 
+/// Minimal placeholder for `sonic_config::FanoutConfig`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FanoutConfig {
+    pub hostname: String,
+    pub mgmt_ip: String,
+    #[serde(default)]
+    pub platform: String,
+    #[serde(default)]
+    pub hwsku: String,
+}
+
+/// Minimal placeholder for `sonic_config::PhysicalLink`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PhysicalLink {
+    pub dut_port: String,
+    pub fanout_host: String,
+    pub fanout_port: String,
+    #[serde(default)]
+    pub ptf_port: String,
+    #[serde(default)]
+    pub vlan_id: u16,
+}
+
 // ---------------------------------------------------------------------------
 // Testbed
 // ---------------------------------------------------------------------------
@@ -99,6 +128,10 @@ pub struct Testbed {
     state: TestbedState,
     /// All known devices keyed by hostname.
     devices: HashMap<String, DeviceInfo>,
+    /// Fanout switch devices keyed by hostname.
+    fanouts: HashMap<String, DeviceInfo>,
+    /// Physical link wiring between DUT, fanout, and PTF ports.
+    links: Vec<PhysicalLink>,
     /// PTF container device info.
     ptf: Option<DeviceInfo>,
     /// Server hosting the VMs.
@@ -167,6 +200,32 @@ impl Testbed {
             devices.insert(nbr.hostname.clone(), info);
         }
 
+        // -- Fanout switches ---------------------------------------------------
+        let mut fanouts = HashMap::new();
+        for fo in &config.fanouts {
+            let ip: IpAddr = fo
+                .mgmt_ip
+                .parse()
+                .map_err(|e| SonicError::config(format!("fanout {} bad IP: {e}", fo.hostname)))?;
+
+            let mut info = DeviceInfo::new(
+                &fo.hostname,
+                ip,
+                DeviceType::Fanout,
+                default_creds.clone(),
+            );
+            info.hwsku = fo.hwsku.clone();
+            info.platform = match fo.platform.to_lowercase().as_str() {
+                "broadcom" => Platform::Broadcom,
+                "mellanox" => Platform::Mellanox,
+                "virtual" => Platform::Virtual,
+                _ => Platform::Unknown,
+            };
+            fanouts.insert(fo.hostname.clone(), info);
+        }
+
+        let links = config.connection_graph.clone();
+
         // -- PTF ------------------------------------------------------------
         let ptf = if let Some(ptf_ip_str) = &config.ptf_ip {
             let ip: IpAddr = ptf_ip_str
@@ -209,6 +268,8 @@ impl Testbed {
             topology: None,
             state: TestbedState::Available,
             devices,
+            fanouts,
+            links,
             ptf,
             server,
             created_at: now,
@@ -308,9 +369,42 @@ impl Testbed {
             .collect()
     }
 
+    /// Returns the fanout device with the given hostname.
+    pub fn get_fanout(&self, hostname: &str) -> sonic_core::Result<&DeviceInfo> {
+        self.fanouts
+            .get(hostname)
+            .ok_or_else(|| SonicError::DeviceNotFound(hostname.to_string()))
+    }
+
+    /// Returns all fanout devices.
+    pub fn get_all_fanouts(&self) -> Vec<&DeviceInfo> {
+        self.fanouts.values().collect()
+    }
+
+    /// Returns the physical links in the connection graph.
+    pub fn connection_graph(&self) -> &[PhysicalLink] {
+        &self.links
+    }
+
+    /// Returns the physical link for a given DUT port, if one exists.
+    pub fn link_for_dut_port(&self, dut_port: &str) -> Option<&PhysicalLink> {
+        self.links.iter().find(|l| l.dut_port == dut_port)
+    }
+
+    /// Returns all physical links associated with a given fanout hostname.
+    pub fn links_for_fanout(&self, fanout_host: &str) -> Vec<&PhysicalLink> {
+        self.links
+            .iter()
+            .filter(|l| l.fanout_host == fanout_host)
+            .collect()
+    }
+
     /// Returns all device hostnames.
     pub fn all_device_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.devices.keys().cloned().collect();
+        for fo in self.fanouts.keys() {
+            names.push(fo.clone());
+        }
         if let Some(ptf) = &self.ptf {
             names.push(ptf.hostname.clone());
         }
@@ -407,6 +501,7 @@ impl TestbedManager for Testbed {
             .devices
             .values()
             .cloned()
+            .chain(self.fanouts.values().cloned())
             .chain(self.ptf.clone())
             .collect();
 
@@ -490,6 +585,8 @@ mod tests {
             server: Some("10.0.0.200".into()),
             default_user: Some("admin".into()),
             default_password: Some("password".into()),
+            fanouts: vec![],
+            connection_graph: vec![],
         }
     }
 

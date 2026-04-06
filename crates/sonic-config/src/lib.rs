@@ -16,5 +16,7 @@ pub mod topology;
 
 pub use app::{AppConfig, LogFormat};
 pub use inventory::{DeviceEntry, InventoryConfig};
-pub use testbed::{DutConfig, DutCredentials, NeighborConfig, TestbedConfig};
+pub use testbed::{
+    DutConfig, DutCredentials, FanoutConfig, NeighborConfig, PhysicalLink, TestbedConfig,
+};
 pub use topology::{ConfigProperty, TopologyConfig, VlanConfig, VlanType, VmConfig};

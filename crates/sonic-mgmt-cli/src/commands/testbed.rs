@@ -46,6 +46,27 @@ fn to_testbed_config(cfg: &TestbedConfig) -> sonic_testbed::TestbedConfig {
         server: if cfg.server.is_empty() { None } else { Some(cfg.server.clone()) },
         default_user: None,
         default_password: None,
+        fanouts: cfg
+            .fanouts
+            .iter()
+            .map(|f| sonic_testbed::FanoutConfig {
+                hostname: f.hostname.clone(),
+                mgmt_ip: f.mgmt_ip.to_string(),
+                platform: f.platform.to_string(),
+                hwsku: f.hwsku.clone(),
+            })
+            .collect(),
+        connection_graph: cfg
+            .connection_graph
+            .iter()
+            .map(|l| sonic_testbed::PhysicalLink {
+                dut_port: l.dut_port.clone(),
+                fanout_host: l.fanout_host.clone(),
+                fanout_port: l.fanout_port.clone(),
+                ptf_port: l.ptf_port.clone(),
+                vlan_id: l.vlan_id,
+            })
+            .collect(),
     }
 }
 

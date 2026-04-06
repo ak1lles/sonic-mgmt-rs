@@ -2,47 +2,43 @@
 # SONiC Device Inventory -- Example
 # =============================================================================
 #
-# An inventory is a flat catalogue of every device the framework may need to
-# contact: DUTs, fanout switches, PTF containers, console servers, etc.
+# An inventory is a flat catalogue of every device the framework can contact:
+# DUTs, fanout switches, PTF containers, console servers, neighbor VMs.
+#
+# Standard testbed wiring:
+#
+#   Tester Server (PTF)  <-->  Fanout Switch  <-->  DUT (SONiC)
+#
+# All three devices appear here with their management IPs and credentials.
 #
 # Validate with:  sonic-mgmt config validate config/inventory.example.toml
 # =============================================================================
 
 # ---------------------------------------------------------------------------
-# Devices -- keyed by hostname
+# DUT
 # ---------------------------------------------------------------------------
 
-[devices.sonic-switch-1]
+[devices.sonic-dut-1]
 mgmt_ip     = "10.0.0.1"
 device_type = "sonic"
 platform    = "mellanox"
 hwsku       = "ACS-MSN2700"
 
-  [devices.sonic-switch-1.credentials]
+  [devices.sonic-dut-1.credentials]
   username = "admin"
   password = "password"
 
-  [devices.sonic-switch-1.connection]
+  [devices.sonic-dut-1.connection]
   connection_type = "ssh"
   port            = 22
 
-  [devices.sonic-switch-1.metadata]
+  [devices.sonic-dut-1.metadata]
   rack   = "A01"
   serial = "MLX123456"
 
-[devices.sonic-switch-2]
-mgmt_ip     = "10.0.0.2"
-device_type = "sonic"
-platform    = "broadcom"
-hwsku       = "Force10-S6000"
-
-  [devices.sonic-switch-2.credentials]
-  username = "admin"
-  password = "password"
-
-  [devices.sonic-switch-2.connection]
-  connection_type = "ssh"
-  port            = 22
+# ---------------------------------------------------------------------------
+# Fanout switch
+# ---------------------------------------------------------------------------
 
 [devices.fanout-1]
 mgmt_ip     = "10.0.1.1"
@@ -51,18 +47,22 @@ platform    = "mellanox"
 hwsku       = "MSN2700"
 
   [devices.fanout-1.credentials]
-  username = "root"
-  password = "rootpass"
+  username = "admin"
+  password = "admin"
 
   [devices.fanout-1.connection]
   connection_type = "ssh"
   port            = 22
 
-  # Optional out-of-band console access for recovery scenarios.
+  # Out-of-band console access for recovery.
   [devices.fanout-1.console]
   server   = "console-server-1"
   port     = 3001
   protocol = "ssh"
+
+# ---------------------------------------------------------------------------
+# PTF tester container
+# ---------------------------------------------------------------------------
 
 [devices.ptf-host]
 mgmt_ip     = "10.255.0.188"
@@ -78,27 +78,31 @@ hwsku       = "ptf"
   connection_type = "ssh"
   port            = 22
 
-[devices.eos-neighbor-1]
+# ---------------------------------------------------------------------------
+# Neighbor VMs
+# ---------------------------------------------------------------------------
+
+[devices.ARISTA01T1]
 mgmt_ip     = "10.250.0.2"
 device_type = "eos"
 platform    = "virtual"
 hwsku       = "vEOS"
 
-  [devices.eos-neighbor-1.credentials]
+  [devices.ARISTA01T1.credentials]
   username = "admin"
   password = "admin"
 
-  [devices.eos-neighbor-1.connection]
+  [devices.ARISTA01T1.connection]
   connection_type = "ssh"
   port            = 22
 
 # ---------------------------------------------------------------------------
-# Groups -- named collections of hostnames
+# Groups
 # ---------------------------------------------------------------------------
 
 [groups]
-all     = ["sonic-switch-1", "sonic-switch-2", "fanout-1", "ptf-host", "eos-neighbor-1"]
-duts    = ["sonic-switch-1", "sonic-switch-2"]
+all     = ["sonic-dut-1", "fanout-1", "ptf-host", "ARISTA01T1"]
+duts    = ["sonic-dut-1"]
 fanouts = ["fanout-1"]
 ptf     = ["ptf-host"]
-vms     = ["eos-neighbor-1"]
+vms     = ["ARISTA01T1"]

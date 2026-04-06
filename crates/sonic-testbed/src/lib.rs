@@ -17,5 +17,7 @@ pub mod operations;
 
 pub use health::{DeviceHealth, HealthChecker, TestbedHealth};
 pub use inventory::{DeviceEntry, InventoryManager};
-pub use manager::{DutConfig, NeighborConfig, Testbed, TestbedConfig};
+pub use manager::{
+    DutConfig, FanoutConfig, NeighborConfig, PhysicalLink, Testbed, TestbedConfig,
+};
 pub use operations::TestbedOps;

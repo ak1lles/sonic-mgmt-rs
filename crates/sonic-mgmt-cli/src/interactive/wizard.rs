@@ -193,6 +193,8 @@ pub async fn run_testbed_wizard() -> Result<()> {
         vm_base,
         duts,
         neighbors: vec![],
+        fanouts: vec![],
+        connection_graph: vec![],
         comment: format!("Created by testbed wizard"),
         metadata: HashMap::new(),
     };
