@@ -1,1 +1,9 @@
 /target/
+/output/
+docker/.cache/
+docs/node_modules/
+docs/.next/
+package-lock.json
+excalidraw.log
+config/testbed.toml
+config/inventory.toml

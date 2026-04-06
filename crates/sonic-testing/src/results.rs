@@ -581,16 +581,16 @@ mod tests {
     fn print_summary_output() {
         let summary = TestSummary {
             total: 10,
-            passed: 8,
-            failed: 1,
+            passed: 9,
+            failed: 0,
             skipped: 1,
             errors: 0,
             duration: Duration::from_secs(42),
-            pass_rate: 80.0,
+            pass_rate: 90.0,
         };
         let text = print_summary(&summary);
         assert!(text.contains("PASSED"));
-        assert!(text.contains("80.0%"));
+        assert!(text.contains("90.0%"));
     }
 
     #[test]

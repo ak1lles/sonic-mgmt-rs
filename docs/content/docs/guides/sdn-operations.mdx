@@ -1,0 +1,131 @@
+---
+title: SDN Operations
+description: Using gNMI, gNOI, and P4Runtime with sonic-mgmt-rs
+---
+
+sonic-mgmt-rs includes gRPC-based SDN protocol clients for programmatic network management beyond traditional CLI commands.
+
+## gNMI (gRPC Network Management Interface)
+
+gNMI provides a standardized way to read and write device configuration and state.
+
+### Get
+
+Retrieve operational state or configuration:
+
+```sh
+# Get interface operational status
+sonic-mgmt sdn gnmi get /interfaces/interface[name=Ethernet0]/state/oper-status
+
+# Get all interface counters
+sonic-mgmt sdn gnmi get /interfaces/interface/state/counters
+
+# Get BGP neighbor state
+sonic-mgmt sdn gnmi get /network-instances/network-instance[name=default]/protocols/protocol[name=BGP]/bgp/neighbors
+```
+
+### Set
+
+Apply configuration changes:
+
+```sh
+# Set interface admin status
+sonic-mgmt sdn gnmi set /interfaces/interface[name=Ethernet0]/config/enabled true
+
+# Set interface description
+sonic-mgmt sdn gnmi set /interfaces/interface[name=Ethernet0]/config/description "Uplink to spine"
+```
+
+### Subscribe
+
+Stream real-time updates:
+
+```sh
+# Subscribe to interface counter updates (sampled)
+sonic-mgmt sdn gnmi subscribe /interfaces/interface/state/counters
+
+# Subscribe to BGP state changes (on-change)
+sonic-mgmt sdn gnmi subscribe /network-instances/network-instance/protocols/protocol/bgp/neighbors/neighbor/state
+```
+
+**Subscription modes:**
+
+| Mode | Description |
+|---|---|
+| `on_change` | Push updates when value changes |
+| `sample` | Push updates at fixed intervals |
+| `target_defined` | Let the target choose the mode |
+
+### Path Encoding
+
+gNMI paths use a structured format:
+
+```
+/interfaces/interface[name=Ethernet0]/state/oper-status
+```
+
+- Path segments are separated by `/`
+- Key-value selectors use `[key=value]` syntax
+- Wildcards: omit selectors to match all instances
+
+### TLS Support
+
+The gNMI client supports TLS for secure connections:
+- Server certificates
+- Client certificate authentication
+- Custom CA bundles
+
+## gNOI (gRPC Network Operations Interface)
+
+gNOI provides operational commands that go beyond configuration.
+
+### Reboot
+
+Remotely reboot a device:
+
+```sh
+sonic-mgmt sdn gnoi reboot sonic-switch-1
+```
+
+### Ping
+
+Run a ping from the device:
+
+```sh
+sonic-mgmt sdn gnoi ping sonic-switch-1 --destination 10.0.0.1
+```
+
+### Other Operations
+
+gNOI also supports:
+- OS installation and activation
+- File transfer operations
+- System diagnostics
+- Certificate management
+
+## P4Runtime
+
+For devices with programmable forwarding planes (e.g., Barefoot/Intel Tofino):
+
+### Write Table Entries
+
+```sh
+sonic-mgmt sdn p4rt write <table> <entry>
+```
+
+### Capabilities
+
+- **Table entries** -- install match-action rules
+- **Counter reads** -- read packet/byte counters
+- **Packet injection** -- send packets into the pipeline
+
+## When to Use SDN Protocols
+
+| Scenario | Protocol | Why |
+|---|---|---|
+| Read interface counters programmatically | gNMI Get | Structured data, no parsing needed |
+| Monitor BGP state changes in real-time | gNMI Subscribe | Push-based, low latency |
+| Apply bulk configuration changes | gNMI Set | Transactional, validated |
+| Remote reboot during testing | gNOI Reboot | Standardized, reliable |
+| Install custom forwarding rules | P4Runtime | Programmable pipeline |
+| Quick ad-hoc commands | CLI (`device exec`) | Simple, human-readable |

@@ -366,3 +366,42 @@ fn parse_cisco_uptime(s: &str) -> u64 {
     }
     total
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uptime_full() {
+        assert_eq!(
+            parse_cisco_uptime("uptime is 1 year, 2 weeks, 3 days, 4 hours, 5 minutes"),
+            365 * 86400 + 2 * 7 * 86400 + 3 * 86400 + 4 * 3600 + 5 * 60
+        );
+    }
+
+    #[test]
+    fn uptime_days_hours() {
+        assert_eq!(
+            parse_cisco_uptime("uptime is 10 days 12 hours"),
+            10 * 86400 + 12 * 3600
+        );
+    }
+
+    #[test]
+    fn uptime_minutes_seconds() {
+        assert_eq!(
+            parse_cisco_uptime("uptime is 30 minutes 45 seconds"),
+            30 * 60 + 45
+        );
+    }
+
+    #[test]
+    fn uptime_empty() {
+        assert_eq!(parse_cisco_uptime(""), 0);
+    }
+
+    #[test]
+    fn uptime_no_numbers() {
+        assert_eq!(parse_cisco_uptime("uptime is unknown"), 0);
+    }
+}

@@ -132,3 +132,166 @@ impl SonicError {
         Self::Other(msg.into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Helper constructors
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn connection_helper() {
+        let err = SonicError::connection("switch-01", "refused");
+        match &err {
+            SonicError::Connection { host, reason } => {
+                assert_eq!(host, "switch-01");
+                assert_eq!(reason, "refused");
+            }
+            other => panic!("expected Connection, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn timeout_helper() {
+        let err = SonicError::timeout(30, "BGP convergence");
+        match &err {
+            SonicError::Timeout { seconds, operation } => {
+                assert_eq!(*seconds, 30);
+                assert_eq!(operation, "BGP convergence");
+            }
+            other => panic!("expected Timeout, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn config_helper() {
+        let err = SonicError::config("missing field");
+        match &err {
+            SonicError::Configuration(msg) => assert_eq!(msg, "missing field"),
+            other => panic!("expected Configuration, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn testbed_helper() {
+        let err = SonicError::testbed("no VMs available");
+        match &err {
+            SonicError::Testbed(msg) => assert_eq!(msg, "no VMs available"),
+            other => panic!("expected Testbed, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn topology_helper() {
+        let err = SonicError::topology("invalid link");
+        match &err {
+            SonicError::Topology(msg) => assert_eq!(msg, "invalid link"),
+            other => panic!("expected Topology, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_helper() {
+        let err = SonicError::test("assertion failed");
+        match &err {
+            SonicError::Test(msg) => assert_eq!(msg, "assertion failed"),
+            other => panic!("expected Test, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn other_helper() {
+        let err = SonicError::other("something unexpected");
+        match &err {
+            SonicError::Other(msg) => assert_eq!(msg, "something unexpected"),
+            other => panic!("expected Other, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Display messages
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn display_connection() {
+        let err = SonicError::connection("host1", "timed out");
+        let msg = err.to_string();
+        assert!(msg.contains("host1"), "expected host in message: {msg}");
+        assert!(msg.contains("timed out"), "expected reason in message: {msg}");
+    }
+
+    #[test]
+    fn display_timeout() {
+        let err = SonicError::timeout(60, "reboot");
+        let msg = err.to_string();
+        assert!(msg.contains("60"), "expected seconds in message: {msg}");
+        assert!(msg.contains("reboot"), "expected operation in message: {msg}");
+    }
+
+    #[test]
+    fn display_config() {
+        let err = SonicError::config("bad value");
+        let msg = err.to_string();
+        assert!(msg.contains("bad value"), "expected detail in message: {msg}");
+        assert!(msg.contains("configuration"), "expected 'configuration' in message: {msg}");
+    }
+
+    #[test]
+    fn display_testbed() {
+        let err = SonicError::testbed("locked");
+        let msg = err.to_string();
+        assert!(msg.contains("locked"), "expected detail in message: {msg}");
+        assert!(msg.contains("testbed"), "expected 'testbed' in message: {msg}");
+    }
+
+    #[test]
+    fn display_topology() {
+        let err = SonicError::topology("cycle detected");
+        let msg = err.to_string();
+        assert!(msg.contains("cycle detected"), "expected detail in message: {msg}");
+        assert!(msg.contains("topology"), "expected 'topology' in message: {msg}");
+    }
+
+    #[test]
+    fn display_test() {
+        let err = SonicError::test("flaky");
+        let msg = err.to_string();
+        assert!(msg.contains("flaky"), "expected detail in message: {msg}");
+        assert!(msg.contains("test"), "expected 'test' in message: {msg}");
+    }
+
+    #[test]
+    fn display_other() {
+        let err = SonicError::other("unknown issue");
+        let msg = err.to_string();
+        assert_eq!(msg, "unknown issue");
+    }
+
+    // -----------------------------------------------------------------------
+    // From impls
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn from_io_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let sonic_err: SonicError = io_err.into();
+        match &sonic_err {
+            SonicError::Io(_) => {}
+            other => panic!("expected Io variant, got {:?}", other),
+        }
+        let msg = sonic_err.to_string();
+        assert!(msg.contains("file missing"), "expected io detail in message: {msg}");
+    }
+
+    #[test]
+    fn from_serde_json_error() {
+        let json_err = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
+        let sonic_err: SonicError = json_err.into();
+        match &sonic_err {
+            SonicError::Json(_) => {}
+            other => panic!("expected Json variant, got {:?}", other),
+        }
+    }
+}

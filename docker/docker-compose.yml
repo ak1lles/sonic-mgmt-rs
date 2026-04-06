@@ -1,0 +1,19 @@
+services:
+  sonic-mgmt:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: sonic-mgmt-runner:latest
+    container_name: sonic-mgmt-runner
+    network_mode: "${SONIC_NETWORK_MODE:-host}"
+    volumes:
+      - ../config:/workspace/config:ro
+      - ${SSH_KEY_DIR:-~/.ssh}:/root/.ssh:ro
+      - ${SONIC_OUTPUT_DIR:-../output}:/workspace/output
+    environment:
+      - SONIC_CONFIG=${SONIC_CONFIG:-config/sonic-mgmt.toml}
+      - SONIC_TESTBED=${SONIC_TESTBED:-}
+      - SONIC_LOG=${SONIC_LOG:-info}
+    working_dir: /workspace
+    stdin_open: true
+    tty: true

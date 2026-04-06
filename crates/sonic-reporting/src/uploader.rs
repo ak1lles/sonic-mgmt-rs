@@ -319,6 +319,7 @@ impl ReportUploader for ReportUploadManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
     use crate::storage::LocalFileStorage;
     use sonic_core::{ReportFormat, TestCase, TestOutcome};
     use std::collections::HashMap;

@@ -269,3 +269,48 @@ impl FactsProvider for PtfHost {
         Ok(ConfigFacts::default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_empty() {
+        assert_eq!(base64_encode(b""), "");
+    }
+
+    #[test]
+    fn base64_single_byte() {
+        // 'A' = 0x41 -> base64 "QQ=="
+        assert_eq!(base64_encode(b"A"), "QQ==");
+    }
+
+    #[test]
+    fn base64_two_bytes() {
+        // "AB" -> base64 "QUI="
+        assert_eq!(base64_encode(b"AB"), "QUI=");
+    }
+
+    #[test]
+    fn base64_three_bytes() {
+        // "ABC" -> base64 "QUJD" (no padding)
+        assert_eq!(base64_encode(b"ABC"), "QUJD");
+    }
+
+    #[test]
+    fn base64_hello_world() {
+        assert_eq!(base64_encode(b"Hello, World!"), "SGVsbG8sIFdvcmxkIQ==");
+    }
+
+    #[test]
+    fn base64_binary_data() {
+        let data: Vec<u8> = (0..=255).collect();
+        let encoded = base64_encode(&data);
+        // Just verify it doesn't panic and produces valid base64 chars
+        assert!(encoded.chars().all(|c| {
+            c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='
+        }));
+        // Length should be ceil(256/3)*4 = 344
+        assert_eq!(encoded.len(), 344);
+    }
+}

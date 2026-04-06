@@ -428,3 +428,74 @@ fn parse_speed_string(s: &str) -> u64 {
         s.parse().unwrap_or(0)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- enable_wrap --------------------------------------------------------
+
+    #[test]
+    fn enable_wrap_prepends_enable() {
+        assert_eq!(EosHost::enable_wrap("show version"), "enable\nshow version");
+    }
+
+    // -- parse_eos_uptime ---------------------------------------------------
+
+    #[test]
+    fn uptime_days_and_hms() {
+        assert_eq!(parse_eos_uptime("1 day, 2:03:04"), 86400 + 7384);
+    }
+
+    #[test]
+    fn uptime_hms_only() {
+        assert_eq!(parse_eos_uptime("0:30:00"), 1800);
+    }
+
+    #[test]
+    fn uptime_days_only() {
+        assert_eq!(parse_eos_uptime("5 days"), 5 * 86400);
+    }
+
+    #[test]
+    fn uptime_empty() {
+        assert_eq!(parse_eos_uptime(""), 0);
+    }
+
+    // -- parse_speed_string -------------------------------------------------
+
+    #[test]
+    fn speed_100g() {
+        assert_eq!(parse_speed_string("100G"), 100_000_000_000);
+    }
+
+    #[test]
+    fn speed_25g_lowercase() {
+        assert_eq!(parse_speed_string("25g"), 25_000_000_000);
+    }
+
+    #[test]
+    fn speed_1gb() {
+        assert_eq!(parse_speed_string("1GB"), 1_000_000_000);
+    }
+
+    #[test]
+    fn speed_100m() {
+        assert_eq!(parse_speed_string("100M"), 100_000_000);
+    }
+
+    #[test]
+    fn speed_100mb() {
+        assert_eq!(parse_speed_string("100MB"), 100_000_000);
+    }
+
+    #[test]
+    fn speed_raw_number() {
+        assert_eq!(parse_speed_string("1000000"), 1_000_000);
+    }
+
+    #[test]
+    fn speed_garbage() {
+        assert_eq!(parse_speed_string("notaspeed"), 0);
+    }
+}

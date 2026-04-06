@@ -1,0 +1,174 @@
+---
+title: Testbed Management
+description: How to deploy, manage, and monitor SONiC testbeds
+---
+
+Testbed management is the core workflow of sonic-mgmt-rs. A testbed goes through a defined lifecycle from creation to teardown.
+
+## Testbed Lifecycle
+
+```
+Created ──► Deploying ──► Deployed ──► Healthy
+                                         │
+                                    ┌────┴────┐
+                                    ▼         ▼
+                                 Degraded   Down
+                                    │         │
+                                    └────┬────┘
+                                         ▼
+                                     Destroyed
+```
+
+| State | Description |
+|---|---|
+| **Created** | Testbed definition exists but nothing is deployed |
+| **Deploying** | Topology deployment in progress |
+| **Deployed** | All VMs and configuration applied successfully |
+| **Healthy** | All devices reachable and services running |
+| **Degraded** | Some devices or services are unhealthy |
+| **Down** | Critical failures, testbed unusable |
+| **Destroyed** | Teardown complete, resources released |
+
+## Deploying a Testbed
+
+### Prerequisites
+
+Before deployment:
+1. A testbed definition file exists (see [Testbed Configuration](/docs/configuration/testbed))
+2. Physical devices (DUTs) are powered on and reachable via management network
+3. If using VMs: VM images (vEOS, cEOS) are available on the server
+4. If using PTF: PTF Docker image is available
+
+### Deploy
+
+```sh
+sonic-mgmt testbed deploy my-testbed
+```
+
+The deployment process:
+1. Validates the testbed configuration
+2. Generates the topology (VMs, VLANs, host interfaces, IP allocation)
+3. Starts neighbor VMs (Arista, Cisco)
+4. Configures VLAN wiring between DUT, VMs, and PTF
+5. Deploys minigraph and config_db to DUTs
+6. Announces BGP routes from neighbors
+7. Waits for convergence
+
+### Monitor Progress
+
+Deployment shows a progress bar with per-step status. Use `--log-level debug` for detailed output:
+
+```sh
+sonic-mgmt --log-level debug testbed deploy my-testbed
+```
+
+## Health Checks
+
+After deployment, verify everything is working:
+
+```sh
+sonic-mgmt testbed health my-testbed
+```
+
+Health checks run **concurrently** across all devices and verify:
+
+- **SSH connectivity** -- can we reach the device?
+- **Service status** -- are critical SONiC services running? (database, swss, bgp, syncd)
+- **BGP sessions** -- are all BGP neighbors established?
+- **Interface status** -- are expected ports up?
+
+The output shows per-device health status and an aggregate testbed health rating.
+
+## Testbed Operations
+
+### Refresh Configuration
+
+Re-apply configuration without full teardown/deploy:
+
+```sh
+sonic-mgmt testbed refresh my-testbed
+```
+
+This re-deploys minigraph and config_db to all DUTs and restarts services as needed.
+
+### Upgrade SONiC Image
+
+Upgrade the SONiC image on all DUTs:
+
+```sh
+sonic-mgmt testbed upgrade my-testbed --image sonic-broadcom.bin
+```
+
+### Teardown
+
+Release all resources:
+
+```sh
+sonic-mgmt testbed teardown my-testbed
+```
+
+This stops VMs, removes VLAN configuration, and resets DUTs.
+
+## Working with Multiple Testbeds
+
+### List All Testbeds
+
+```sh
+sonic-mgmt testbed list
+```
+
+### Show Specific Testbed
+
+```sh
+sonic-mgmt testbed show my-testbed
+```
+
+Displays: topology type, DUT list, VM status, PTF info, current state, and metadata.
+
+### Set Default Testbed
+
+In `sonic-mgmt.toml`:
+
+```toml
+[testbed]
+active = "my-testbed"
+```
+
+Or override per-command:
+
+```sh
+sonic-mgmt testbed health other-testbed
+```
+
+## Topology Types for Testbeds
+
+Choose the right topology based on what you're testing:
+
+| What You're Testing | Topology | Why |
+|---|---|---|
+| Basic L2/L3 forwarding | `t0` | Standard leaf setup, most test coverage |
+| BGP convergence at scale | `t1-64` | 64 neighbors exercise BGP at scale |
+| LAG failover | `t1-lag` | LAG links between spine and leaves |
+| Dual-TOR redundancy | `dualtor` | Active-standby TOR pair |
+| Packet injection only | `ptf` | Minimal setup, no VMs needed |
+| 3-tier fabric | `t2` | Super-spine with full fabric depth |
+
+## Troubleshooting
+
+### Deployment fails at VM startup
+
+- Verify VM images exist on the server
+- Check server has enough resources (RAM, CPU)
+- Look for port conflicts with existing testbeds
+
+### Health check shows "Degraded"
+
+- Run `sonic-mgmt device facts <hostname>` to inspect the failing device
+- Check BGP: `sonic-mgmt device exec <hostname> "show ip bgp summary"`
+- Check services: `sonic-mgmt device exec <hostname> "show system status"`
+
+### Connection timeout
+
+- Verify management network connectivity
+- Check SSH credentials in testbed definition
+- Try direct SSH: `ssh admin@<mgmt_ip>`

@@ -1,0 +1,71 @@
+# sonic-mgmt-rs -- cargo-make task definitions
+# =============================================================================
+#
+# All Docker lifecycle management is handled by the `sonic-mgmt` binary
+# (`sonic-mgmt docker <subcommand>`).  Makefile.toml is a thin dispatcher.
+#
+# Usage:
+#   makers docker-build    # build test runner image
+#   makers docker-up       # start test runner container
+#   makers docker-test     # run integration tests in container
+#   makers docker-down     # tear down
+
+[config]
+default_to_workspace = false
+
+# =============================================================================
+# Public tasks
+# =============================================================================
+
+[tasks.build]
+description = "Build the project"
+command = "cargo"
+args = ["build"]
+
+[tasks.test]
+description = "Run unit tests"
+command = "cargo"
+args = ["test"]
+
+[tasks.docker-build]
+description = "Build the test runner image"
+command = "cargo"
+args = ["run", "--bin", "sonic-mgmt", "--", "docker", "build"]
+
+[tasks.docker-up]
+description = "Start the test runner container"
+command = "cargo"
+args = ["run", "--bin", "sonic-mgmt", "--", "docker", "up"]
+
+[tasks.docker-down]
+description = "Stop and remove the test runner container"
+command = "cargo"
+args = ["run", "--bin", "sonic-mgmt", "--", "docker", "down"]
+
+[tasks.docker-status]
+description = "Show test runner status"
+command = "cargo"
+args = ["run", "--bin", "sonic-mgmt", "--", "docker", "status"]
+
+[tasks.docker-shell]
+description = "Open a shell inside the test runner"
+command = "cargo"
+args = ["run", "--bin", "sonic-mgmt", "--", "docker", "shell"]
+
+[tasks.docker-test]
+description = "Run integration tests inside the container"
+command = "cargo"
+args = ["run", "--bin", "sonic-mgmt", "--", "docker", "test"]
+
+[tasks.integration-test]
+description = "Run integration tests directly on the host (requires testbed network access)"
+command = "cargo"
+args = [
+    "test", "-p", "sonic-integration-tests", "--test", "integration",
+    "--", "--ignored", "--test-threads=1",
+]
+
+[tasks.ci]
+description = "CI: lint + unit tests (integration requires testbed)"
+command = "cargo"
+args = ["test"]

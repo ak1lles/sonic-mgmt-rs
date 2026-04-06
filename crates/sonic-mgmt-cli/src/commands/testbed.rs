@@ -10,6 +10,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
+use inquire::Confirm;
 
 use sonic_config::{AppConfig, TestbedConfig};
 use sonic_core::{HealthStatus, TestbedManager};
@@ -106,6 +107,9 @@ pub enum TestbedAction {
         #[arg(long)]
         image: String,
     },
+
+    /// Run the interactive testbed creation wizard
+    Wizard,
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +126,9 @@ pub async fn handle(cmd: TestbedCmd, config_path: &str) -> Result<()> {
         TestbedAction::Refresh { name } => refresh_testbed(&name, config_path).await,
         TestbedAction::Upgrade { name, image } => {
             upgrade_testbed(&name, &image, config_path).await
+        }
+        TestbedAction::Wizard => {
+            crate::interactive::wizard::run_testbed_wizard().await
         }
     }
 }
@@ -255,6 +262,19 @@ async fn deploy_testbed(name: &str, config_path: &str) -> Result<()> {
     let _app_config = AppConfig::load_or_default(config_path)
         .context("failed to load application config")?;
 
+    let confirm = Confirm::new(&format!(
+        "Deploy testbed '{}' with topology '{}'?",
+        name, tb_config.topo
+    ))
+    .with_default(true)
+    .with_help_message("This will provision VMs and configure devices")
+    .prompt()?;
+
+    if !confirm {
+        println!("{}", "Deploy cancelled.".yellow());
+        return Ok(());
+    }
+
     println!(
         "{} Deploying testbed {} with topology {} ...",
         "=>".green().bold(),
@@ -288,6 +308,16 @@ async fn deploy_testbed(name: &str, config_path: &str) -> Result<()> {
 
 async fn teardown_testbed(name: &str, config_path: &str) -> Result<()> {
     let tb_config = find_testbed(name, config_path)?;
+
+    let confirm = Confirm::new(&format!("Tear down testbed '{}'?", name))
+        .with_default(false)
+        .with_help_message("This will destroy all VMs and remove the topology")
+        .prompt()?;
+
+    if !confirm {
+        println!("{}", "Teardown cancelled.".yellow());
+        return Ok(());
+    }
 
     println!(
         "{} Tearing down testbed {} ...",
@@ -409,6 +439,19 @@ async fn refresh_testbed(name: &str, config_path: &str) -> Result<()> {
 
 async fn upgrade_testbed(name: &str, image: &str, config_path: &str) -> Result<()> {
     let _tb_config = find_testbed(name, config_path)?;
+
+    let confirm = Confirm::new(&format!(
+        "Upgrade testbed '{}' with image '{}'?",
+        name, image
+    ))
+    .with_default(false)
+    .with_help_message("This will install a new SONiC image and reboot all DUTs")
+    .prompt()?;
+
+    if !confirm {
+        println!("{}", "Upgrade cancelled.".yellow());
+        return Ok(());
+    }
 
     println!(
         "{} Upgrading testbed {} with image: {}",

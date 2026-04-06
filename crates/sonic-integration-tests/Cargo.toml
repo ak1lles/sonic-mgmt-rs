@@ -1,0 +1,24 @@
+[package]
+name = "sonic-integration-tests"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+# Integration test binary -- not a library.
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[dependencies]
+sonic-core = { path = "../sonic-core" }
+sonic-device = { path = "../sonic-device" }
+sonic-config = { path = "../sonic-config" }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+sonic-core = { path = "../sonic-core" }
+sonic-device = { path = "../sonic-device" }
+sonic-config = { path = "../sonic-config" }
+tokio = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,17 @@
+{
+  "title": "Documentation",
+  "pages": [
+    "---Introduction---",
+    "index",
+    "---Getting Started---",
+    "getting-started",
+    "---Reference---",
+    "architecture",
+    "configuration",
+    "cli",
+    "---Guides---",
+    "guides",
+    "---Development---",
+    "development"
+  ]
+}

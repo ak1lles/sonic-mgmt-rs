@@ -1,0 +1,219 @@
+---
+title: Test Framework
+description: How to discover, write, and run tests with sonic-mgmt-rs
+---
+
+The sonic-mgmt-rs test framework handles test discovery, execution with fixtures, parallel workers, and result aggregation.
+
+## Test Definition Format
+
+Tests are defined in `test_*.toml` files. Each file contains one or more `[[test]]` entries:
+
+```toml
+[[test]]
+name        = "test_bgp_convergence"
+module      = "bgp"
+tags        = ["bgp", "convergence", "routing"]
+topology    = "t0"
+platform    = "mellanox"
+timeout_secs = 300
+description = "Verify BGP converges within 60 seconds after neighbor restart"
+
+[[test]]
+name        = "test_bgp_graceful_restart"
+module      = "bgp"
+tags        = ["bgp", "graceful-restart"]
+topology    = "t0"
+timeout_secs = 600
+description = "Verify BGP graceful restart preserves forwarding during restart"
+
+[[test]]
+name        = "test_vlan_forwarding"
+module      = "l2"
+tags        = ["vlan", "forwarding", "l2"]
+topology    = "t0"
+timeout_secs = 180
+description = "Verify L2 forwarding within VLANs"
+```
+
+### Test Fields
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `name` | Yes | | Unique test identifier |
+| `module` | Yes | | Logical module grouping (e.g., `bgp`, `l2`, `acl`) |
+| `tags` | No | `[]` | Tags for filtering |
+| `topology` | No | | Required topology type |
+| `platform` | No | | Required platform (e.g., `mellanox`, `broadcom`) |
+| `timeout_secs` | No | `900` | Per-test timeout in seconds |
+| `description` | No | | Human-readable description |
+
+## Test Discovery
+
+Scan a directory for test files:
+
+```sh
+# Discover all tests
+sonic-mgmt test discover --path tests/
+
+# Filter by tag
+sonic-mgmt test discover --path tests/ --tag bgp
+
+# Filter by topology
+sonic-mgmt test discover --path tests/ --topology t0
+
+# Filter by platform
+sonic-mgmt test discover --path tests/ --platform mellanox
+
+# Filter by name pattern
+sonic-mgmt test discover --path tests/ --pattern "*graceful*"
+```
+
+The discovery engine:
+1. Scans the directory for files matching `test_*.toml`
+2. Parses all `[[test]]` entries
+3. Applies filters (tags, topology, platform, pattern)
+4. Returns a sorted list of matching tests
+
+## Running Tests
+
+### Basic Execution
+
+```sh
+sonic-mgmt test run --path tests/
+```
+
+### Parallel Execution
+
+```sh
+# Run with 4 parallel workers
+sonic-mgmt test run --path tests/ -j 4
+```
+
+Workers are managed with a semaphore-based pool. Each worker gets its own execution context.
+
+### Filtering
+
+```sh
+# By tag
+sonic-mgmt test run --path tests/ --tag bgp --tag routing
+
+# By topology
+sonic-mgmt test run --path tests/ --topology t1
+
+# By platform
+sonic-mgmt test run --path tests/ --platform broadcom
+
+# Exclude patterns
+sonic-mgmt test run --path tests/ --exclude "*slow*"
+```
+
+### Fail-Fast Mode
+
+Stop execution on the first failure:
+
+```sh
+sonic-mgmt test run --path tests/ --fail-fast
+```
+
+### Dry Run
+
+See what would run without executing:
+
+```sh
+sonic-mgmt test run --path tests/ --dry-run
+```
+
+### Custom Timeout
+
+Override the per-test timeout:
+
+```sh
+sonic-mgmt test run --path tests/ --timeout 1800
+```
+
+## Test Fixtures
+
+Fixtures provide shared setup/teardown logic across tests. They support dependency resolution and scoping.
+
+### Fixture Scopes
+
+| Scope | Lifetime | Use Case |
+|---|---|---|
+| **Session** | Entire test run | One-time global setup (e.g., deploy topology) |
+| **Module** | All tests in a module | Per-module setup (e.g., configure BGP) |
+| **Class** | Group of related tests | Shared test state |
+| **Function** | Single test | Per-test setup/teardown |
+
+Fixtures are resolved via topological sort to handle dependencies correctly. Setup runs broadest-scope-first, teardown runs narrowest-scope-first.
+
+### Fixture Lifecycle
+
+```
+Session Setup ──► Module Setup ──► Function Setup
+                                        │
+                                    Test Execution
+                                        │
+Function Teardown ◄── Module Teardown ◄── Session Teardown
+```
+
+## Test Results
+
+### Output Formats
+
+Results can be written in multiple formats:
+
+| Format | Description |
+|---|---|
+| `junit_xml` | Standard JUnit XML (default, CI-compatible) |
+| `json` | JSON format for programmatic consumption |
+| `toml` | TOML format |
+| `csv` | CSV format for spreadsheet import |
+| `html` | HTML report for viewing in browser |
+
+### Result Summary
+
+After execution, a colored summary is printed:
+
+```
+Test Results Summary
+══════════════════════════════════════════
+Total:   42
+Passed:  38  (90.5%)
+Failed:   2
+Skipped:  1
+Errors:   1
+Duration: 12m 34s
+══════════════════════════════════════════
+```
+
+### Viewing Results
+
+```sh
+# View results from output directory
+sonic-mgmt test results --output output/
+
+# Parse a specific JUnit XML file
+sonic-mgmt report parse output/results.xml
+```
+
+## Test Outcomes
+
+| Outcome | Meaning |
+|---|---|
+| **Passed** | Test completed successfully |
+| **Failed** | Test assertion failed |
+| **Skipped** | Test was skipped (e.g., wrong topology) |
+| **Error** | Test encountered an unexpected error |
+| **XFail** | Expected failure occurred |
+| **XPass** | Unexpectedly passed (expected to fail) |
+
+## Interactive Test Planning
+
+The test wizard helps you plan a test run interactively:
+
+```sh
+sonic-mgmt test wizard
+```
+
+This walks you through selecting tests, configuring parallelism, setting timeouts, and choosing output formats.

@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
 use colored::Colorize;
+use inquire::Confirm;
 
 use sonic_config::{DeviceEntry, InventoryConfig};
 use sonic_core::{
@@ -76,6 +77,9 @@ pub enum DeviceAction {
         #[arg(long, short = 't', value_enum, default_value = "basic")]
         facts_type: FactsType,
     },
+
+    /// Run the interactive inventory creation wizard
+    Wizard,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy)]
@@ -124,6 +128,9 @@ pub async fn handle(cmd: DeviceCmd, _config_path: &str) -> Result<()> {
             hostname,
             facts_type,
         } => collect_facts(&hostname, facts_type, inventory_path).await,
+        DeviceAction::Wizard => {
+            crate::interactive::wizard::run_inventory_wizard().await
+        }
     }
 }
 
@@ -376,6 +383,19 @@ async fn reboot_device(
     let entry = inventory
         .get_device(hostname)
         .ok_or_else(|| anyhow::anyhow!("device `{}` not found in inventory", hostname))?;
+
+    let confirm = Confirm::new(&format!(
+        "Reboot device '{}' ({} reboot)?",
+        hostname, reboot_type
+    ))
+    .with_default(false)
+    .with_help_message("The device will be unreachable during reboot")
+    .prompt()?;
+
+    if !confirm {
+        println!("{}", "Reboot cancelled.".yellow());
+        return Ok(());
+    }
 
     println!(
         "{} Rebooting {} ({} reboot) ...",

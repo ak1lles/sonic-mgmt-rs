@@ -184,7 +184,7 @@ mod tests {
         assert_eq!(val.value, 99);
 
         // Second call should return the cached value, not call fetch_fn.
-        let val2 = cache
+        let val2: Sample = cache
             .get_or_fetch("key", || async {
                 panic!("should not be called");
             })

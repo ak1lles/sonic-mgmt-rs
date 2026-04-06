@@ -342,3 +342,76 @@ impl sonic_core::Connection for ConsoleConnection {
         ConnectionType::Console
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use sonic_core::Connection;
+
+    fn test_console_info() -> ConsoleInfo {
+        ConsoleInfo {
+            server: "console-server".into(),
+            port: 7782,
+            protocol: ConnectionType::Ssh,
+        }
+    }
+
+    #[test]
+    fn conserver_escape_is_ctrl_e() {
+        assert_eq!(CONSERVER_ESCAPE, 0x05);
+    }
+
+    #[test]
+    fn conserver_force_sequence() {
+        assert_eq!(CONSERVER_FORCE, &[0x05, b'c', b'f']);
+    }
+
+    #[test]
+    fn conserver_break_sequence() {
+        assert_eq!(CONSERVER_BREAK, &[0x05, b'c', b'l', b'0']);
+    }
+
+    #[test]
+    fn default_prompt_matches_common_prompts() {
+        let creds = Credentials::new("admin").with_password("pass");
+        let conn = ConsoleConnection::new(test_console_info(), "dut-1", creds);
+        assert!(conn.prompt.is_match("admin@sonic:~$ "));
+        assert!(conn.prompt.is_match("sonic# "));
+        assert!(conn.prompt.is_match("Router> "));
+    }
+
+    #[test]
+    fn with_prompt_overrides_default() {
+        let creds = Credentials::new("admin").with_password("pass");
+        let conn = ConsoleConnection::new(test_console_info(), "dut-1", creds)
+            .with_prompt(r"MYDEVICE#\s*$")
+            .unwrap();
+        assert!(conn.prompt.is_match("MYDEVICE# "));
+        assert!(!conn.prompt.is_match("sonic# "));
+    }
+
+    #[test]
+    fn connection_type_is_console() {
+        let creds = Credentials::new("admin");
+        let conn = ConsoleConnection::new(test_console_info(), "dut-1", creds);
+        assert_eq!(conn.connection_type(), ConnectionType::Console);
+    }
+
+    #[test]
+    fn with_timeouts() {
+        let creds = Credentials::new("admin");
+        let conn = ConsoleConnection::new(test_console_info(), "dut-1", creds)
+            .with_connect_timeout(Duration::from_secs(10))
+            .with_command_timeout(Duration::from_secs(30));
+        assert_eq!(conn.connect_timeout, Duration::from_secs(10));
+        assert_eq!(conn.command_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn device_name_stored() {
+        let creds = Credentials::new("admin");
+        let conn = ConsoleConnection::new(test_console_info(), "my-switch", creds);
+        assert_eq!(conn.device_name, "my-switch");
+    }
+}

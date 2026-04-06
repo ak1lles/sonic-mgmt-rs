@@ -77,6 +77,9 @@ pub enum TestAction {
         tag: Vec<String>,
     },
 
+    /// Run the interactive test planning wizard
+    Wizard,
+
     /// Display or export test results
     Results {
         /// Path to test output directory
@@ -152,6 +155,9 @@ pub async fn handle(cmd: TestCmd, config_path: &str) -> Result<()> {
                 config_path,
             )
             .await
+        }
+        TestAction::Wizard => {
+            crate::interactive::wizard::run_test_wizard().await
         }
         TestAction::Results { path, format } => show_results(&path, format).await,
     }

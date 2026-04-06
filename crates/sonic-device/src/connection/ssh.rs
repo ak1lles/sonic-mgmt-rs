@@ -237,14 +237,15 @@ impl sonic_core::Connection for SshConnection {
                     }
                     ChannelMsg::ExtendedData { ref data, ext } => {
                         if ext == 1 {
-                            // stderr
                             stderr.extend_from_slice(data);
                         }
                     }
                     ChannelMsg::ExitStatus { exit_status } => {
                         exit_code = exit_status as i32;
                     }
-                    ChannelMsg::Eof | ChannelMsg::Close => break,
+                    // Eof means no more data, but ExitStatus may still follow.
+                    // Only break on Close (channel fully done).
+                    ChannelMsg::Close => break,
                     _ => {}
                 }
             }

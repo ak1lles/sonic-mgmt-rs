@@ -1,0 +1,213 @@
+---
+title: Architecture
+description: How the sonic-mgmt-rs workspace is organized and how the crates interact
+---
+
+## Workspace Overview
+
+sonic-mgmt-rs is a Cargo workspace with 9 functional crates plus an integration test crate. Each crate has a single responsibility and communicates through the shared types and traits defined in `sonic-core`.
+
+```
+                    ┌─────────────────────┐
+                    │   sonic-mgmt-cli    │  CLI binary
+                    │  (clap + inquire)   │
+                    └────────┬────────────┘
+                             │ depends on all crates below
+         ┌───────────┬───────┼───────┬────────────┬──────────┐
+         ▼           ▼       ▼       ▼            ▼          ▼
+   ┌──────────┐ ┌─────────┐ ┌──────────┐ ┌───────────┐ ┌─────────┐
+   │  testbed │ │ testing │ │ topology │ │ reporting │ │   sdn   │
+   └────┬─────┘ └────┬────┘ └────┬─────┘ └───────────┘ └─────────┘
+        │             │           │
+        └──────┬──────┘           │
+               ▼                  │
+         ┌──────────┐             │
+         │  device  │◄────────────┘
+         └────┬─────┘
+              │
+              ▼
+        ┌──────────┐    ┌──────────┐
+        │  config  │    │   core   │  ◄── shared by everything
+        └──────────┘    └──────────┘
+```
+
+## Crate Responsibilities
+
+### sonic-core
+
+The foundation layer. Defines all shared types, traits, and errors used across the workspace.
+
+**Key types:**
+- `DeviceType` -- SONiC, EOS, Cisco, Fanout, PTF, K8sMaster, and more
+- `ConnectionType` -- SSH, Telnet, Console, gRPC, Local
+- `Platform` -- Broadcom, Mellanox, Barefoot, Marvell, Nokia, etc.
+- `TopologyType` -- T0, T1, T2, Dualtor, PTF variants, and more
+- `TestOutcome` -- Passed, Failed, Skipped, Error, XFail, XPass
+- `Credentials`, `DeviceInfo`, `CommandResult`
+
+**Key traits:**
+- `Device` -- connect, execute, reboot, wait_ready
+- `FactsProvider` -- collect basic_facts, bgp_facts, interface_facts, config_facts
+- `Connection` -- open, close, send, send_command, is_alive
+- `TestbedManager` -- deploy, teardown, health_check
+- `TopologyGenerator` -- generate topology definitions
+- `TestRunner` -- discover, run, stop tests
+- `ReportUploader` -- upload results
+
+**Error handling:**
+Uses `thiserror` to define a comprehensive `SonicError` enum with 20+ variants covering connection failures, authentication errors, command execution issues, configuration problems, and more.
+
+---
+
+### sonic-config
+
+Handles all configuration file loading, validation, merging, and serialization. Supports both TOML and YAML.
+
+**Configuration layers:**
+1. Compiled-in defaults
+2. Project-level `sonic-mgmt.toml`
+3. CLI flags and environment variables (highest priority)
+
+**Config sections:**
+- `AppConfig` -- root, with testbed, connection, testing, reporting, topology, and logging sections
+- `TestbedConfig` -- testbed definitions with DUTs, neighbors, PTF, and metadata
+- `InventoryConfig` -- device catalog with credentials, connection info, and grouping
+
+---
+
+### sonic-device
+
+The device abstraction layer. Provides transport-agnostic device operations.
+
+**Connection types:**
+- `SshConnection` -- async SSH via `russh` with key + password auth fallback
+- `TelnetConnection` -- RFC 854 telnet with IAC negotiation
+- `ConsoleConnection` -- serial console via conserver daemon
+- `ConnectionPool` -- reuses connections keyed by (host, port, type)
+
+**Host implementations:**
+- `SonicHost` -- primary DUT: config reload, minigraph, container status, CRM, queue counters
+- `EosHost` -- Arista EOS: enable mode, configure terminal, BGP/interface management
+- `CiscoHost` -- Cisco IOS/NX-OS: configure terminal, show commands
+- `FanoutHost` -- fanout switches: port speed, VLAN operations
+- `PtfHost` -- PTF container: run PTF tests, file transfer, IP management
+
+**Facts collection:**
+Each host type can collect:
+- `BasicFacts` -- hostname, hwsku, OS version, platform, serial, model
+- `BgpFacts` -- neighbors, routes, AS numbers
+- `InterfaceFacts` -- ports, VLANs, LAGs, loopbacks
+- `ConfigFacts` -- running/startup config, features, services
+
+Facts are cached with a configurable TTL (default 5 minutes).
+
+---
+
+### sonic-testbed
+
+Manages the full testbed lifecycle.
+
+**States:** Created -> Deploying -> Deployed -> Healthy -> Degraded -> Down -> Destroyed
+
+**Capabilities:**
+- Deploy and teardown topologies
+- Concurrent health checks across all devices
+- Config deployment (minigraph, config_db)
+- Testbed recovery operations
+- SONiC image upgrade
+
+---
+
+### sonic-topology
+
+Generates network topology definitions for all supported topology families.
+
+**Supported topologies (13):**
+
+| Type | VMs | Host Interfaces | Description |
+|---|---|---|---|
+| T0 | 4 | 32 | Leaf switch with servers |
+| T0-64 | 64 | 64 | Scaled leaf |
+| T0-116 | 116 | 116 | Large leaf |
+| T1 | 32 | 0 | Spine with leaf connections |
+| T1-64 | 64 | 0 | Scaled spine |
+| T1-LAG | 32 | 0 | Spine with LAG links |
+| T2 | 64 | 0 | Super-spine |
+| Dualtor | 4 | 32 | Dual top-of-rack |
+| MgmtTor | 4 | 32 | Management TOR |
+| M0-VLAN | 4 | 32 | VLAN segmentation |
+| PTF-32 | 0 | 32 | PTF-only, 32 ports |
+| PTF-64 | 0 | 64 | PTF-only, 64 ports |
+| PTF | 0 | 8 | Minimal PTF |
+
+**Allocators:** Automatically assigns IPv4/IPv6 addresses, VLAN IDs, and VM instances.
+
+**Rendering:** Uses Tera templates to output inventory TOML, minigraph XML, and config_db.json.
+
+---
+
+### sonic-testing
+
+Complete test lifecycle management.
+
+**Discovery:** Scans directories for `test_*.toml` files. Each file contains `[[test]]` entries with name, module, tags, topology, platform, and timeout.
+
+**Fixtures:** Dependency-resolved fixtures with scopes (Test, Module, Session) and automatic setup/teardown ordering.
+
+**Execution:** Semaphore-based parallel execution with configurable worker count, per-test timeouts, fail-fast mode, and crash recovery.
+
+**Results:** Aggregation into `TestSuite` with pass/fail/skip/error counts, duration tracking, and multiple output formats (JUnit XML, JSON, TOML, CSV, HTML).
+
+---
+
+### sonic-reporting
+
+Test result parsing, analytics, and upload.
+
+- **JUnit XML** -- streaming parser for JUnit reports
+- **Coverage** -- SAI/SWSS test coverage tracking
+- **Storage backends** -- local file system or Azure Data Explorer (Kusto)
+- **Upload manager** -- retry logic with metadata (testbed, timestamp, uploader)
+
+---
+
+### sonic-sdn
+
+gRPC-based SDN protocol clients:
+
+- **gNMI** -- Get, Set, Subscribe with path encoding and TLS
+- **gNOI** -- reboot, ping, OS operations
+- **P4Runtime** -- table entries, counters, packet injection
+
+---
+
+### sonic-mgmt-cli
+
+The user-facing binary that ties everything together. Built with `clap` for command parsing and `inquire` for interactive prompts. Features colored output, progress bars, and structured logging.
+
+## Design Patterns
+
+| Pattern | Where | Why |
+|---|---|---|
+| Trait-based abstraction | `sonic-core` traits | Swap implementations (e.g., different device types) without changing calling code |
+| Factory pattern | `create_host()` | Dispatch to correct host type based on `DeviceType` |
+| Connection pooling | `sonic-device` | Reuse SSH/Telnet connections across operations |
+| TTL caching | Facts collection | Avoid re-collecting device facts on every call |
+| Config layering | `sonic-config` | Merge defaults + file + CLI flags |
+| Topological sort | Fixture resolution | Resolve fixture dependencies in correct order |
+| Async-first | All I/O | Concurrent device operations via tokio |
+
+## Technology Stack
+
+| Category | Libraries |
+|---|---|
+| Async runtime | `tokio` (full), `async-trait`, `futures` |
+| CLI | `clap` (derive), `inquire`, `colored`, `indicatif` |
+| SSH | `russh`, `russh-keys` |
+| Serialization | `serde`, `toml`, `serde_yaml`, `serde_json`, `quick-xml` |
+| gRPC | `tonic`, `prost` |
+| HTTP | `reqwest` |
+| Error handling | `thiserror`, `anyhow` |
+| Logging | `tracing`, `tracing-subscriber` |
+| Templating | `tera` |
+| Networking | `ipnetwork` |

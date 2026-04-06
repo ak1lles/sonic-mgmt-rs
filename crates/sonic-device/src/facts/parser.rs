@@ -618,7 +618,7 @@ pub fn parse_lag_brief(output: &str) -> Vec<LagInfo> {
             LacpMode::On
         };
 
-        let admin_status = if protocol_str.contains("Up") {
+        let admin_status = if protocol_str.contains("UP") {
             PortStatus::Up
         } else {
             PortStatus::Down
@@ -810,5 +810,345 @@ SNMP_ACL  CTRLPLANE  all       SNMP_ACL       ingress  Active
         assert_eq!(tables[0].table_type, AclTableType::L3);
         assert_eq!(tables[0].stage, AclStage::Ingress);
         assert_eq!(tables[1].table_type, AclTableType::Ctrlplane);
+    }
+
+    // ---------------------------------------------------------------
+    // parse_show_version edge cases
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_parse_show_version_empty() {
+        let facts = parse_show_version("");
+        assert_eq!(facts.hostname, "");
+        assert_eq!(facts.os_version, "");
+        assert_eq!(facts.uptime, 0);
+    }
+
+    #[test]
+    fn test_parse_show_version_alternate_keys() {
+        let output = "\
+Software Version: SONiC.master.123
+Hardware SKU: Arista-7260CX3-D108C8
+hostname: leaf-01
+";
+        let facts = parse_show_version(output);
+        assert_eq!(facts.os_version, "SONiC.master.123");
+        assert_eq!(facts.hwsku, "Arista-7260CX3-D108C8");
+        assert_eq!(facts.hostname, "leaf-01");
+    }
+
+    #[test]
+    fn test_parse_show_version_uptime_no_days() {
+        let output = "Uptime: 12:30:45\n";
+        let facts = parse_show_version(output);
+        assert_eq!(facts.uptime, 12 * 3600 + 30 * 60 + 45);
+    }
+
+    #[test]
+    fn test_parse_show_version_uptime_days_only() {
+        let output = "Uptime: 7 days\n";
+        let facts = parse_show_version(output);
+        assert_eq!(facts.uptime, 7 * 86400);
+    }
+
+    // ---------------------------------------------------------------
+    // parse_uptime_seconds
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_parse_uptime_seconds_zero() {
+        assert_eq!(parse_uptime_seconds(""), 0);
+        assert_eq!(parse_uptime_seconds("garbage"), 0);
+    }
+
+    #[test]
+    fn test_parse_uptime_seconds_hms_only() {
+        assert_eq!(parse_uptime_seconds("1:02:03"), 3723);
+    }
+
+    #[test]
+    fn test_parse_uptime_seconds_days_and_hms() {
+        assert_eq!(parse_uptime_seconds("2 days, 10:00:00"), 2 * 86400 + 36000);
+    }
+
+    // ---------------------------------------------------------------
+    // parse_bgp_summary edge cases
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_parse_bgp_summary_empty() {
+        let facts = parse_bgp_summary("");
+        assert_eq!(facts.router_id, "");
+        assert_eq!(facts.local_as, 0);
+        assert!(facts.neighbors.is_empty());
+    }
+
+    #[test]
+    fn test_parse_bgp_summary_no_neighbors() {
+        let output = "\
+BGP router identifier 10.0.0.1, local AS number 65000 vrf-id 0
+BGP table version 0
+
+Neighbor        V  AS    MsgRcvd MsgSent TblVer InQ OutQ Up/Down  State/PfxRcd
+Total number of neighbors 0
+";
+        let facts = parse_bgp_summary(output);
+        assert_eq!(facts.router_id, "10.0.0.1");
+        assert_eq!(facts.local_as, 65000);
+        assert!(facts.neighbors.is_empty());
+    }
+
+    #[test]
+    fn test_parse_bgp_summary_all_states() {
+        let output = "\
+BGP router identifier 10.0.0.1, local AS number 65000 vrf-id 0
+
+Neighbor        V  AS    MsgRcvd MsgSent TblVer InQ OutQ Up/Down  State/PfxRcd
+10.0.0.1        4  65001  100     100     0      0   0    01:00:00 Connect
+10.0.0.2        4  65002  100     100     0      0   0    01:00:00 Active
+10.0.0.3        4  65003  100     100     0      0   0    01:00:00 OpenSent
+10.0.0.4        4  65004  100     100     0      0   0    01:00:00 OpenConfirm
+10.0.0.5        4  65005  100     100     0      0   0    01:00:00 Idle(Admin)
+";
+        let facts = parse_bgp_summary(output);
+        assert_eq!(facts.neighbors.len(), 5);
+        assert_eq!(facts.neighbors[0].state, BgpState::Connect);
+        assert_eq!(facts.neighbors[1].state, BgpState::Active);
+        assert_eq!(facts.neighbors[2].state, BgpState::OpenSent);
+        assert_eq!(facts.neighbors[3].state, BgpState::OpenConfirm);
+        assert_eq!(facts.neighbors[4].state, BgpState::Idle);
+    }
+
+    #[test]
+    fn test_parse_bgp_neighbor_line_short_line() {
+        // Lines with < 9 columns should be skipped
+        assert!(parse_bgp_neighbor_line("10.0.0.1 4 65000", 65000).is_none());
+    }
+
+    #[test]
+    fn test_parse_bgp_neighbor_line_invalid_ip() {
+        let line = "not-an-ip    4  65000  100  100  0  0  0  01:00:00 100";
+        assert!(parse_bgp_neighbor_line(line, 65000).is_none());
+    }
+
+    // ---------------------------------------------------------------
+    // parse_bgp_summary_json edge cases
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_parse_bgp_summary_json_empty_object() {
+        let facts = parse_bgp_summary_json("{}").unwrap();
+        assert_eq!(facts.router_id, "");
+        assert_eq!(facts.local_as, 0);
+        assert!(facts.neighbors.is_empty());
+    }
+
+    #[test]
+    fn test_parse_bgp_summary_json_multiple_afs() {
+        let json = r#"{
+  "ipv4Unicast": {
+    "routerId": "10.0.0.1",
+    "as": 65000,
+    "peers": {
+      "10.0.0.2": { "remoteAs": 65001, "state": "Established", "pfxRcd": 100, "pfxSnt": 50 }
+    }
+  },
+  "ipv6Unicast": {
+    "routerId": "10.0.0.1",
+    "as": 65000,
+    "peers": {
+      "fc00::2": { "remoteAs": 65001, "state": "Active", "pfxRcd": 0, "pfxSnt": 0 }
+    }
+  }
+}"#;
+        let facts = parse_bgp_summary_json(json).unwrap();
+        assert_eq!(facts.neighbors.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_bgp_summary_json_invalid_peer_ip() {
+        let json = r#"{
+  "ipv4Unicast": {
+    "routerId": "10.0.0.1",
+    "as": 65000,
+    "peers": {
+      "not-an-ip": { "remoteAs": 65001, "state": "Idle" }
+    }
+  }
+}"#;
+        let facts = parse_bgp_summary_json(json).unwrap();
+        assert!(facts.neighbors.is_empty());
+    }
+
+    // ---------------------------------------------------------------
+    // parse_interface_status edge cases
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_parse_interface_status_empty() {
+        assert!(parse_interface_status("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_interface_status_header_only() {
+        let output = "\
+  Interface        Lanes    Speed    MTU    FEC    Alias    Vlan    Oper    Admin
+-----------  -----------  -------  -----  -----  ------  ------  ------  -------
+";
+        assert!(parse_interface_status(output).is_empty());
+    }
+
+    #[test]
+    fn test_parse_interface_status_portchannel() {
+        let output = "\
+  Interface        Lanes    Speed    MTU    FEC    Alias    Vlan    Oper    Admin
+-----------  -----------  -------  -----  -----  ------  ------  ------  -------
+  PortChannel1     N/A      40G    9100    N/A    N/A     trunk    up      up
+";
+        let ports = parse_interface_status(output);
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].name, "PortChannel1");
+        assert_eq!(ports[0].speed, 40_000_000_000);
+    }
+
+    #[test]
+    fn test_parse_interface_status_skips_non_port_lines() {
+        let output = "\
+  Interface        Lanes    Speed    MTU    FEC    Alias    Vlan    Oper    Admin
+-----------  -----------  -------  -----  -----  ------  ------  ------  -------
+  some-garbage-line that doesn't start with Ethernet
+  Ethernet0        0,1      25G    9100    rs    Eth1/1   routed   up      up
+";
+        let ports = parse_interface_status(output);
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].name, "Ethernet0");
+    }
+
+    // ---------------------------------------------------------------
+    // parse_vlan_brief edge cases
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_parse_vlan_brief_empty() {
+        assert!(parse_vlan_brief("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_vlan_brief_single_vlan_no_members() {
+        let output = "\
++-----------+-----------------+-----------+----------------+-----------+
+|   VLAN ID | IP Address      | Ports     | Port Tagging   | Proxy ARP |
++===========+=================+===========+================+===========+
+|      100  |                 |           |                | disabled  |
++-----------+-----------------+-----------+----------------+-----------+
+";
+        let vlans = parse_vlan_brief(output);
+        assert_eq!(vlans.len(), 1);
+        assert_eq!(vlans[0].id, 100);
+        assert!(vlans[0].members.is_empty());
+    }
+
+    // ---------------------------------------------------------------
+    // parse_lag_brief edge cases
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_parse_lag_brief_empty() {
+        assert!(parse_lag_brief("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_lag_brief_passive_lacp() {
+        let output = "\
+  No.  Team Dev       Protocol     Ports
+-----  ----------     ---------    --------
+    1  PortChannel1   LACP(I)(Up)  Ethernet0(S)
+";
+        let lags = parse_lag_brief(output);
+        assert_eq!(lags.len(), 1);
+        assert_eq!(lags[0].lacp_mode, LacpMode::Passive);
+    }
+
+    #[test]
+    fn test_parse_lag_brief_static_lag() {
+        let output = "\
+  No.  Team Dev       Protocol     Ports
+-----  ----------     ---------    --------
+    1  PortChannel1   NONE(Up)     Ethernet0(S)
+";
+        let lags = parse_lag_brief(output);
+        assert_eq!(lags.len(), 1);
+        assert_eq!(lags[0].lacp_mode, LacpMode::On);
+    }
+
+    // ---------------------------------------------------------------
+    // parse_acl_table edge cases
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_parse_acl_table_empty() {
+        assert!(parse_acl_table("").is_empty());
+    }
+
+    #[test]
+    fn test_parse_acl_table_all_types() {
+        let output = "\
+Name    Type         Binding    Description  Stage    Status
+------  ----------   ---------  -----------  -------  --------
+T1      L3           Ethernet0  test         ingress  Active
+T2      L3V6         Ethernet0  test         ingress  Active
+T3      MIRROR       Ethernet0  test         egress   Active
+T4      MIRROR_DSCP  Ethernet0  test         ingress  Active
+T5      PFCWD        Ethernet0  test         ingress  Active
+";
+        let tables = parse_acl_table(output);
+        assert_eq!(tables.len(), 5);
+        assert_eq!(tables[0].table_type, AclTableType::L3);
+        assert_eq!(tables[1].table_type, AclTableType::L3V6);
+        assert_eq!(tables[2].table_type, AclTableType::Mirror);
+        assert_eq!(tables[2].stage, AclStage::Egress);
+        assert_eq!(tables[3].table_type, AclTableType::MirrorDscp);
+        assert_eq!(tables[4].table_type, AclTableType::Pfcwd);
+    }
+
+    // ---------------------------------------------------------------
+    // Helper functions
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_split_kv() {
+        assert_eq!(split_kv("key: value"), Some(("key", "value")));
+        assert_eq!(split_kv("key:value"), Some(("key", "value")));
+        assert_eq!(split_kv("key:  spaces  "), Some(("key", "spaces")));
+        assert_eq!(split_kv("no separator"), None);
+        assert_eq!(split_kv(": no key"), None);
+    }
+
+    #[test]
+    fn test_extract_port_index() {
+        assert_eq!(extract_port_index("Ethernet0"), Some(0));
+        assert_eq!(extract_port_index("Ethernet48"), Some(48));
+        assert_eq!(extract_port_index("PortChannel1"), Some(1));
+        assert_eq!(extract_port_index("Loopback0"), Some(0));
+        assert_eq!(extract_port_index("nodigits"), None);
+    }
+
+    #[test]
+    fn test_parse_speed() {
+        assert_eq!(parse_speed("100G"), Some(100_000_000_000));
+        assert_eq!(parse_speed("25g"), Some(25_000_000_000));
+        assert_eq!(parse_speed("1G"), Some(1_000_000_000));
+        assert_eq!(parse_speed("100M"), Some(100_000_000));
+        assert_eq!(parse_speed("10m"), Some(10_000_000));
+        assert_eq!(parse_speed("notaspeed"), None);
+        assert_eq!(parse_speed("G"), None);
+    }
+
+    #[test]
+    fn test_parse_tagging() {
+        assert_eq!(parse_tagging("tagged"), TaggingMode::Tagged);
+        assert_eq!(parse_tagging("untagged"), TaggingMode::Untagged);
+        assert_eq!(parse_tagging("UNTAGGED"), TaggingMode::Untagged);
+        assert_eq!(parse_tagging("something"), TaggingMode::Tagged);
     }
 }

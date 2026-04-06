@@ -1,0 +1,157 @@
+---
+title: Testbed Configuration
+description: How to define testbeds with DUTs, topology, PTF, and neighbor VMs
+---
+
+A **testbed** defines the complete test environment: which devices are under test, what topology they're wired in, and the supporting infrastructure (PTF containers, neighbor VMs, physical servers).
+
+## File Format
+
+Testbed definitions are TOML files. Point to yours in `sonic-mgmt.toml`:
+
+```toml
+[testbed]
+active = "vms-t0"
+file   = "config/testbed.toml"
+```
+
+## Full Example
+
+```toml
+# Testbed metadata
+name      = "vms-t0"
+group     = "vms"
+topo      = "t0"
+ptf_image = "docker-ptf"
+ptf_ip    = "10.255.0.188"
+server    = "server-1"
+vm_base   = "VM0100"
+comment   = "T0 testbed with two Mellanox DUTs"
+
+# Devices Under Test
+[[duts]]
+hostname = "sonic-dut-1"
+mgmt_ip  = "10.0.0.1"
+hwsku    = "ACS-MSN2700"
+platform = "mellanox"
+
+  [duts.credentials]
+  username = "admin"
+  password = "password"
+
+[[duts]]
+hostname = "sonic-dut-2"
+mgmt_ip  = "10.0.0.2"
+hwsku    = "Force10-S6000"
+platform = "broadcom"
+
+  [duts.credentials]
+  username = "admin"
+  key_path = "/home/user/.ssh/sonic_key"
+
+# Neighbor VMs (optional -- auto-generated from topology if omitted)
+[[neighbors]]
+hostname = "ARISTA01T1"
+vm_type  = "veos"
+mgmt_ip  = "10.250.0.2"
+
+[[neighbors]]
+hostname = "ARISTA02T1"
+vm_type  = "ceos"
+mgmt_ip  = "10.250.0.3"
+
+# Optional metadata
+[metadata]
+owner   = "sonic-team"
+purpose = "nightly regression"
+```
+
+## Field Reference
+
+### Top-Level Fields
+
+| Field | Required | Description |
+|---|---|---|
+| `name` | Yes | Unique testbed identifier |
+| `group` | Yes | Logical grouping (e.g., `vms`, `physical`, `docker`) |
+| `topo` | Yes | Topology type: `t0`, `t1`, `t2`, `dualtor`, `ptf`, etc. |
+| `ptf_image` | No | Docker image for the PTF container |
+| `ptf_ip` | No | Management IP of the PTF container |
+| `server` | Yes | Hostname of the physical server hosting this testbed |
+| `vm_base` | No | Base name for auto-generated VMs (e.g., `VM0100`) |
+| `comment` | No | Human-readable description |
+
+### DUT Fields (`[[duts]]`)
+
+Each `[[duts]]` entry defines a Device Under Test:
+
+| Field | Required | Description |
+|---|---|---|
+| `hostname` | Yes | Device hostname (must match inventory if using one) |
+| `mgmt_ip` | Yes | Management IP address |
+| `hwsku` | Yes | Hardware SKU (e.g., `ACS-MSN2700`, `Force10-S6000`) |
+| `platform` | Yes | Platform: `mellanox`, `broadcom`, `barefoot`, `vs`, etc. |
+| `credentials.username` | Yes | SSH username |
+| `credentials.password` | No | SSH password (use `key_path` for key-based auth) |
+| `credentials.key_path` | No | Path to SSH private key |
+
+### Neighbor Fields (`[[neighbors]]`)
+
+| Field | Required | Description |
+|---|---|---|
+| `hostname` | Yes | VM hostname (e.g., `ARISTA01T1`) |
+| `vm_type` | Yes | VM type: `veos`, `ceos`, `vsonic`, `vcisco`, `csonic` |
+| `mgmt_ip` | Yes | Management IP for the VM |
+
+### Metadata (`[metadata]`)
+
+Arbitrary key-value pairs. Commonly used fields:
+
+| Field | Description |
+|---|---|
+| `owner` | Team or person responsible |
+| `purpose` | What this testbed is used for |
+
+## Common Topology Choices
+
+| Topology | When to Use |
+|---|---|
+| `t0` | Testing a leaf switch with servers (most common) |
+| `t1` | Testing a spine switch with leaf connections |
+| `t2` | Testing super-spine in 3-tier fabric |
+| `dualtor` | Testing dual top-of-rack redundancy |
+| `ptf` | PTF-only testing (no VMs, just packet injection) |
+
+## Creating Testbeds Interactively
+
+The testbed wizard walks you through creating a testbed file step-by-step:
+
+```sh
+sonic-mgmt testbed wizard
+```
+
+## Docker Testbed
+
+For local development with SONiC VS:
+
+```toml
+name  = "docker-vs"
+group = "docker"
+topo  = "ptf"
+
+server = "localhost"
+
+[[duts]]
+hostname = "sonic-vs"
+mgmt_ip  = "127.0.0.1"
+hwsku    = "Force10-S6000"
+platform = "vs"
+
+  [duts.credentials]
+  username = "admin"
+  password = "YourPaSsWoRd"
+
+[metadata]
+owner   = "dev"
+purpose = "docker integration testing"
+```

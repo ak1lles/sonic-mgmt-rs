@@ -1,0 +1,167 @@
+---
+title: Inventory Configuration
+description: How to define your device inventory for sonic-mgmt-rs
+---
+
+The **inventory** is a flat catalog of every device the framework can contact. Unlike the testbed (which defines a specific test setup), the inventory is a comprehensive registry of all available devices.
+
+## File Format
+
+Inventory files are TOML. Reference them from your testbed or application config.
+
+## Full Example
+
+```toml
+# SONiC DUT devices
+[devices.sonic-switch-1]
+mgmt_ip     = "10.0.0.1"
+device_type = "sonic"
+platform    = "mellanox"
+hwsku       = "ACS-MSN2700"
+
+  [devices.sonic-switch-1.credentials]
+  username = "admin"
+  password = "password"
+
+  [devices.sonic-switch-1.connection]
+  connection_type = "ssh"
+  port            = 22
+
+  [devices.sonic-switch-1.metadata]
+  rack   = "A01"
+  serial = "MLX123456"
+
+  [devices.sonic-switch-1.console]
+  server   = "console-server-1"
+  port     = 3001
+  protocol = "ssh"
+
+[devices.sonic-switch-2]
+mgmt_ip     = "10.0.0.2"
+device_type = "sonic"
+platform    = "broadcom"
+hwsku       = "Force10-S6000"
+
+  [devices.sonic-switch-2.credentials]
+  username = "admin"
+  key_path = "/home/user/.ssh/sonic_key"
+
+  [devices.sonic-switch-2.connection]
+  connection_type = "ssh"
+  port            = 22
+
+# Fanout switches
+[devices.fanout-1]
+mgmt_ip     = "10.0.1.1"
+device_type = "fanout"
+platform    = "mellanox"
+hwsku       = "MSN2700-Fanout"
+
+  [devices.fanout-1.credentials]
+  username = "admin"
+  password = "fanout-pass"
+
+# PTF container
+[devices.ptf-host]
+mgmt_ip     = "10.255.0.188"
+device_type = "ptf"
+platform    = "virtual"
+
+  [devices.ptf-host.credentials]
+  username = "root"
+  password = "root"
+
+# Arista EOS neighbor
+[devices.eos-neighbor-1]
+mgmt_ip     = "10.250.0.2"
+device_type = "eos"
+platform    = "virtual"
+
+  [devices.eos-neighbor-1.credentials]
+  username = "admin"
+  password = "arista"
+
+# Device groups
+[groups]
+all     = ["sonic-switch-1", "sonic-switch-2", "fanout-1", "ptf-host", "eos-neighbor-1"]
+duts    = ["sonic-switch-1", "sonic-switch-2"]
+fanouts = ["fanout-1"]
+ptf     = ["ptf-host"]
+vms     = ["eos-neighbor-1"]
+```
+
+## Field Reference
+
+### Device Fields (`[devices.<hostname>]`)
+
+| Field | Required | Description |
+|---|---|---|
+| `mgmt_ip` | Yes | Management IP address |
+| `device_type` | Yes | One of: `sonic`, `eos`, `cisco`, `fanout`, `ptf`, `k8s_master` |
+| `platform` | No | Hardware platform: `mellanox`, `broadcom`, `barefoot`, `marvell`, `nokia`, `cisco`, `centec`, `virtual` |
+| `hwsku` | No | Hardware SKU identifier |
+
+### Credentials (`[devices.<hostname>.credentials]`)
+
+| Field | Required | Description |
+|---|---|---|
+| `username` | Yes | SSH/login username |
+| `password` | No | Password (mutually exclusive with `key_path` for SSH) |
+| `key_path` | No | Path to SSH private key |
+
+### Connection (`[devices.<hostname>.connection]`)
+
+| Field | Default | Description |
+|---|---|---|
+| `connection_type` | `ssh` | Transport: `ssh`, `telnet`, `console`, `grpc`, `local` |
+| `port` | `22` | Connection port |
+
+### Console (`[devices.<hostname>.console]`)
+
+For out-of-band console access:
+
+| Field | Description |
+|---|---|
+| `server` | Console server hostname or IP |
+| `port` | Console server port number |
+| `protocol` | Protocol: `ssh` or `telnet` |
+
+### Metadata (`[devices.<hostname>.metadata]`)
+
+Arbitrary key-value pairs for organization:
+
+| Field | Description |
+|---|---|
+| `rack` | Physical rack location |
+| `serial` | Device serial number |
+| `environment` | Deployment context (e.g., `production`, `docker`, `lab`) |
+
+### Groups (`[groups]`)
+
+Named collections of device hostnames. Used for batch operations:
+
+```toml
+[groups]
+all     = ["device-1", "device-2", "device-3"]
+duts    = ["device-1", "device-2"]
+fanouts = ["device-3"]
+```
+
+## Supported Device Types
+
+| Type | Description | Connection Methods |
+|---|---|---|
+| `sonic` | SONiC NOS devices (primary DUTs) | SSH, Telnet, Console |
+| `eos` | Arista EOS (neighbors, fanouts) | SSH |
+| `cisco` | Cisco IOS/NX-OS | SSH, Telnet |
+| `fanout` | VLAN-based fanout switches | SSH |
+| `ptf` | Packet Test Framework containers | SSH |
+| `k8s_master` | Kubernetes master nodes | SSH |
+
+## Creating Inventory Interactively
+
+```sh
+sonic-mgmt device wizard
+```
+
+This walks you through adding devices one at a time with validation.

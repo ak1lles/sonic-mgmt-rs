@@ -3063,6 +3063,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sonic-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "sonic-config",
+ "sonic-core",
+ "sonic-device",
+ "tokio",
+]
+
+[[package]]
 name = "sonic-mgmt-cli"
 version = "0.1.0"
 dependencies = [

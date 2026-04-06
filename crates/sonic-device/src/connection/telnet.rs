@@ -383,3 +383,107 @@ impl sonic_core::Connection for TelnetConnection {
         ConnectionType::Telnet
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sonic_core::Connection;
+
+    // -- negotiate_option ---------------------------------------------------
+
+    #[test]
+    fn negotiate_do_suppress_go_ahead_accepts() {
+        assert_eq!(
+            TelnetConnection::negotiate_option(DO, OPT_SUPPRESS_GO_AHEAD),
+            [IAC, WILL, OPT_SUPPRESS_GO_AHEAD]
+        );
+    }
+
+    #[test]
+    fn negotiate_do_unknown_refuses() {
+        let opt = 99;
+        assert_eq!(
+            TelnetConnection::negotiate_option(DO, opt),
+            [IAC, WONT, opt]
+        );
+    }
+
+    #[test]
+    fn negotiate_will_echo_accepts() {
+        assert_eq!(
+            TelnetConnection::negotiate_option(WILL, OPT_ECHO),
+            [IAC, DO, OPT_ECHO]
+        );
+    }
+
+    #[test]
+    fn negotiate_will_suppress_go_ahead_accepts() {
+        assert_eq!(
+            TelnetConnection::negotiate_option(WILL, OPT_SUPPRESS_GO_AHEAD),
+            [IAC, DO, OPT_SUPPRESS_GO_AHEAD]
+        );
+    }
+
+    #[test]
+    fn negotiate_will_unknown_refuses() {
+        let opt = 42;
+        assert_eq!(
+            TelnetConnection::negotiate_option(WILL, opt),
+            [IAC, DONT, opt]
+        );
+    }
+
+    #[test]
+    fn negotiate_dont_replies_wont() {
+        assert_eq!(
+            TelnetConnection::negotiate_option(DONT, OPT_ECHO),
+            [IAC, WONT, OPT_ECHO]
+        );
+    }
+
+    #[test]
+    fn negotiate_wont_replies_dont() {
+        assert_eq!(
+            TelnetConnection::negotiate_option(WONT, OPT_ECHO),
+            [IAC, DONT, OPT_ECHO]
+        );
+    }
+
+    // -- strip_telnet_sequences (needs a mock stream, so test the sync parts) --
+
+    #[test]
+    fn default_prompt_matches_common_prompts() {
+        let creds = Credentials::new("user").with_password("pass");
+        let conn = TelnetConnection::new("host", 23, creds);
+        assert!(conn.prompt.is_match("admin@sonic:~$ "));
+        assert!(conn.prompt.is_match("sonic# "));
+        assert!(conn.prompt.is_match("Router> "));
+    }
+
+    #[test]
+    fn with_prompt_overrides_default() {
+        let creds = Credentials::new("user").with_password("pass");
+        let conn = TelnetConnection::new("host", 23, creds)
+            .with_prompt(r"custom-prompt>>\s*$")
+            .unwrap();
+        assert!(conn.prompt.is_match("custom-prompt>> "));
+        assert!(!conn.prompt.is_match("sonic# "));
+    }
+
+    #[test]
+    fn connection_type_is_telnet() {
+        let creds = Credentials::new("user");
+        let conn = TelnetConnection::new("host", 23, creds);
+        assert_eq!(conn.connection_type(), ConnectionType::Telnet);
+    }
+
+    #[test]
+    fn with_timeouts() {
+        let creds = Credentials::new("user");
+        let conn = TelnetConnection::new("host", 23, creds)
+            .with_connect_timeout(Duration::from_secs(5))
+            .with_command_timeout(Duration::from_secs(10));
+        assert_eq!(conn.connect_timeout, Duration::from_secs(5));
+        assert_eq!(conn.command_timeout, Duration::from_secs(10));
+    }
+}

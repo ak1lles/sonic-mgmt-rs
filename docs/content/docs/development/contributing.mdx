@@ -1,0 +1,131 @@
+---
+title: Contributing
+description: How to develop, test, and contribute to sonic-mgmt-rs
+---
+
+## Development Setup
+
+```sh
+# Clone and build
+git clone https://github.com/your-org/sonic-mgmt-rs.git
+cd sonic-mgmt-rs
+cargo build
+
+# Run unit tests
+cargo test
+
+# Lint
+cargo clippy --workspace
+
+# Format
+cargo fmt --all
+
+# Build documentation
+cargo doc --workspace --no-deps
+```
+
+## Project Structure
+
+```
+sonic-mgmt-rs/
+├── Cargo.toml              # Workspace root
+├── Makefile.toml            # cargo-make tasks
+├── config/                  # Example configs
+├── docker/                  # SONiC VS integration
+├── crates/
+│   ├── sonic-core/          # Types, traits, errors
+│   ├── sonic-config/        # Configuration management
+│   ├── sonic-device/        # Device connections + hosts
+│   ├── sonic-testbed/       # Testbed lifecycle
+│   ├── sonic-topology/      # Topology generation
+│   ├── sonic-testing/       # Test framework
+│   ├── sonic-reporting/     # Reports + upload
+│   ├── sonic-sdn/           # gNMI, gNOI, P4Runtime
+│   ├── sonic-mgmt-cli/      # CLI binary
+│   └── sonic-integration-tests/
+└── docs/                    # This documentation site
+```
+
+## Crate Dependency Graph
+
+Changes flow upward -- if you modify `sonic-core`, everything above it recompiles:
+
+```
+sonic-mgmt-cli
+  ├── sonic-testbed
+  │     └── sonic-device
+  │           ├── sonic-config
+  │           └── sonic-core
+  ├── sonic-testing
+  │     └── sonic-device
+  ├── sonic-topology
+  │     └── sonic-core
+  ├── sonic-reporting
+  │     └── sonic-core
+  └── sonic-sdn
+        └── sonic-core
+```
+
+## Running Tests
+
+### Unit Tests
+
+```sh
+# All crates
+cargo test
+
+# Specific crate
+cargo test -p sonic-device
+cargo test -p sonic-topology
+```
+
+### Integration Tests
+
+Require a running SONiC VS container:
+
+```sh
+# Automated (handles container lifecycle)
+cargo make docker-test
+
+# Manual
+docker compose -f docker/docker-compose.yml up -d
+./docker/scripts/wait-for-sonic.sh
+cargo test -p sonic-integration-tests --test integration -- --ignored --test-threads=1
+```
+
+### Full CI
+
+```sh
+cargo make ci
+```
+
+Runs: lint + unit tests + integration tests + container teardown.
+
+## Adding a New Device Type
+
+1. Add the variant to `DeviceType` in `crates/sonic-core/src/types.rs`
+2. Create a new host file in `crates/sonic-device/src/hosts/` (e.g., `junos.rs`)
+3. Implement the `Device` and `FactsProvider` traits
+4. Register in the `create_host()` factory in `crates/sonic-device/src/hosts/mod.rs`
+
+## Adding a New Topology
+
+1. Add the variant to `TopologyType` in `crates/sonic-core/src/types.rs`
+2. Add a `generate_<name>()` method in `crates/sonic-topology/src/generator.rs`
+3. Add the match arm in the `generate()` dispatcher
+4. Add it to `supported_topologies()` return list
+
+## Adding a New CLI Command
+
+1. Add the command struct in `crates/sonic-mgmt-cli/src/commands/`
+2. Add it to the `Cli` enum in `crates/sonic-mgmt-cli/src/main.rs`
+3. Add the handler function and dispatch arm
+
+## Code Style
+
+- Use `cargo fmt` before committing
+- Run `cargo clippy --workspace` and address warnings
+- Error types go in `sonic-core/src/error.rs`
+- Shared types go in `sonic-core/src/types.rs`
+- All I/O operations should be async
+- Use `tracing` macros for logging (`info!`, `debug!`, `warn!`, `error!`)

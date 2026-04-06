@@ -1,0 +1,457 @@
+---
+title: UNH IOL Setup Guide
+description: Step-by-step guide for setting up sonic-mgmt-rs at the UNH InterOperability Laboratory
+---
+
+This guide walks through deploying sonic-mgmt-rs in a lab environment like the UNH InterOperability Laboratory (IOL). It covers the full setup from bare metal to running your first test suite.
+
+## Overview
+
+At a high level, getting sonic-mgmt-rs running at the IOL involves:
+
+1. **Build the tool** on a management workstation
+2. **Configure the device inventory** with your lab switches
+3. **Define testbeds** for your test topologies
+4. **Deploy topologies** with VMs and PTF containers
+5. **Run tests** and collect results
+
+## Lab Architecture
+
+A typical IOL SONiC test setup:
+
+```
+┌──────────────────────────────────────────────────────┐
+│                    Management Network                 │
+│                    (10.0.0.0/24)                      │
+├──────────┬──────────┬──────────┬─────────────────────┤
+│          │          │          │                       │
+│   ┌──────┴───┐  ┌───┴────┐  ┌─┴──────┐  ┌──────────┐│
+│   │ Test     │  │ SONiC  │  │ SONiC  │  │ Console  ││
+│   │ Server   │  │ DUT 1  │  │ DUT 2  │  │ Server   ││
+│   │          │  │        │  │        │  │          ││
+│   │ - VMs    │  │ Memory │  │ Broad  │  │ Serial   ││
+│   │ - PTF    │  │ -lanox │  │ -com   │  │ access   ││
+│   │ - sonic  │  │        │  │        │  │          ││
+│   │   -mgmt  │  │        │  │        │  │          ││
+│   └──────┬───┘  └───┬────┘  └─┬──────┘  └──────────┘│
+│          │          │          │                       │
+├──────────┴──────────┴──────────┴──────────────────────┤
+│              Data Plane Network                        │
+│         (Fanout switches, VLAN wiring)                │
+└───────────────────────────────────────────────────────┘
+```
+
+**Components:**
+- **Test server** -- Linux machine running sonic-mgmt-rs, VMs, and PTF containers
+- **SONiC DUTs** -- physical switches running SONiC, connected via management + data plane
+- **Fanout switches** -- VLAN-based switches wiring DUT ports to PTF and VMs
+- **Console server** -- out-of-band serial console access to DUTs
+
+## Step 1: Install on the Test Server
+
+### System Requirements
+
+- **OS:** Ubuntu 20.04+ or similar Linux distribution
+- **RAM:** 16GB+ (VMs need ~2GB each)
+- **CPU:** 8+ cores recommended for parallel test execution
+- **Disk:** 100GB+ for VM images, test artifacts, and logs
+- **Network:** Management network access to all DUTs
+
+### Install Rust
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+```
+
+### Build sonic-mgmt-rs
+
+```sh
+git clone https://github.com/your-org/sonic-mgmt-rs.git
+cd sonic-mgmt-rs
+cargo build --release
+sudo cp target/release/sonic-mgmt /usr/local/bin/
+```
+
+### Install cargo-make
+
+```sh
+cargo install cargo-make
+```
+
+### Verify
+
+```sh
+sonic-mgmt --help
+```
+
+## Step 2: Configure the Device Inventory
+
+Create an inventory file listing all lab devices. This is the master catalog of everything sonic-mgmt-rs can connect to.
+
+### Create config/iol-inventory.toml
+
+```toml
+# ═══════════════════════════════════════════════════════
+# UNH IOL SONiC Test Lab -- Device Inventory
+# ═══════════════════════════════════════════════════════
+
+# ── SONiC DUTs ────────────────────────────────────────
+
+[devices.sonic-mlnx-01]
+mgmt_ip     = "10.0.0.10"
+device_type = "sonic"
+platform    = "mellanox"
+hwsku       = "ACS-MSN2700"
+
+  [devices.sonic-mlnx-01.credentials]
+  username = "admin"
+  password = "YourPaSsWoRd"
+
+  [devices.sonic-mlnx-01.connection]
+  connection_type = "ssh"
+  port            = 22
+
+  [devices.sonic-mlnx-01.console]
+  server   = "console-server"
+  port     = 3001
+  protocol = "ssh"
+
+  [devices.sonic-mlnx-01.metadata]
+  rack   = "R01"
+  serial = "MLX2024001"
+  location = "UNH IOL Lab B"
+
+[devices.sonic-brcm-01]
+mgmt_ip     = "10.0.0.11"
+device_type = "sonic"
+platform    = "broadcom"
+hwsku       = "Force10-S6000"
+
+  [devices.sonic-brcm-01.credentials]
+  username = "admin"
+  password = "YourPaSsWoRd"
+
+  [devices.sonic-brcm-01.connection]
+  connection_type = "ssh"
+  port            = 22
+
+  [devices.sonic-brcm-01.console]
+  server   = "console-server"
+  port     = 3002
+  protocol = "ssh"
+
+  [devices.sonic-brcm-01.metadata]
+  rack   = "R01"
+  serial = "S6K2024001"
+  location = "UNH IOL Lab B"
+
+# ── Fanout Switches ───────────────────────────────────
+
+[devices.fanout-01]
+mgmt_ip     = "10.0.0.20"
+device_type = "fanout"
+platform    = "mellanox"
+hwsku       = "MSN2700-Fanout"
+
+  [devices.fanout-01.credentials]
+  username = "admin"
+  password = "fanout-password"
+
+# ── PTF Container ─────────────────────────────────────
+
+[devices.ptf-01]
+mgmt_ip     = "10.0.0.30"
+device_type = "ptf"
+platform    = "virtual"
+
+  [devices.ptf-01.credentials]
+  username = "root"
+  password = "root"
+
+# ── Groups ────────────────────────────────────────────
+
+[groups]
+all     = ["sonic-mlnx-01", "sonic-brcm-01", "fanout-01", "ptf-01"]
+duts    = ["sonic-mlnx-01", "sonic-brcm-01"]
+fanouts = ["fanout-01"]
+ptf     = ["ptf-01"]
+```
+
+### Verify Connectivity
+
+```sh
+# Check that devices are reachable
+sonic-mgmt device list
+sonic-mgmt device facts sonic-mlnx-01
+```
+
+## Step 3: Define Testbeds
+
+Create testbed files for your test configurations. You'll likely want multiple testbeds for different topology types.
+
+### config/iol-testbed-t0.toml
+
+```toml
+# T0 testbed -- Mellanox leaf switch
+name      = "iol-t0-mlnx"
+group     = "iol"
+topo      = "t0"
+ptf_image = "docker-ptf"
+ptf_ip    = "10.0.0.30"
+server    = "test-server-01"
+vm_base   = "VM0100"
+
+comment = "UNH IOL T0 testbed -- Mellanox MSN2700"
+
+[[duts]]
+hostname = "sonic-mlnx-01"
+mgmt_ip  = "10.0.0.10"
+hwsku    = "ACS-MSN2700"
+platform = "mellanox"
+
+  [duts.credentials]
+  username = "admin"
+  password = "YourPaSsWoRd"
+
+[metadata]
+owner    = "iol-sonic-team"
+purpose  = "SONiC conformance testing"
+location = "UNH IOL Lab B"
+```
+
+### config/iol-testbed-t1.toml
+
+```toml
+# T1 testbed -- Broadcom spine switch
+name      = "iol-t1-brcm"
+group     = "iol"
+topo      = "t1"
+ptf_image = "docker-ptf"
+ptf_ip    = "10.0.0.30"
+server    = "test-server-01"
+vm_base   = "VM0200"
+
+comment = "UNH IOL T1 testbed -- Broadcom S6000"
+
+[[duts]]
+hostname = "sonic-brcm-01"
+mgmt_ip  = "10.0.0.11"
+hwsku    = "Force10-S6000"
+platform = "broadcom"
+
+  [duts.credentials]
+  username = "admin"
+  password = "YourPaSsWoRd"
+
+[metadata]
+owner    = "iol-sonic-team"
+purpose  = "SONiC spine conformance testing"
+location = "UNH IOL Lab B"
+```
+
+## Step 4: Create Application Config
+
+### sonic-mgmt.toml
+
+```toml
+[testbed]
+active = "iol-t0-mlnx"
+file   = "config/iol-testbed-t0.toml"
+
+[connection]
+default_ssh_port = 22
+timeout_secs     = 30
+retries          = 3
+
+[testing]
+parallel_workers = 4        # Use multiple workers for faster runs
+timeout_secs     = 900      # 15 min per test
+output_dir       = "output"
+report_format    = "junit_xml"
+
+[reporting]
+# Configure if you have Azure Data Explorer access
+# backend_url  = "https://your-cluster.kusto.windows.net"
+# auth_method  = "azure_cli"
+# database     = "sonic_results"
+# table        = "iol_test_runs"
+
+[topology]
+vm_base_ip = "10.250.0.2"
+vlan_base  = 1000
+ip_offset  = 1
+
+[logging]
+level  = "info"
+format = "full"
+file   = "/var/log/sonic-mgmt/sonic-mgmt.log"
+```
+
+## Step 5: Deploy and Test
+
+### Deploy the T0 Testbed
+
+```sh
+# Deploy topology
+sonic-mgmt testbed deploy iol-t0-mlnx
+
+# Check health
+sonic-mgmt testbed health iol-t0-mlnx
+```
+
+### Run the Test Suite
+
+```sh
+# Discover available tests
+sonic-mgmt test discover --path tests/
+
+# Run all T0 tests with 4 workers
+sonic-mgmt test run --path tests/ --topology t0 -j 4
+
+# Run specific test categories
+sonic-mgmt test run --path tests/ --tag bgp
+sonic-mgmt test run --path tests/ --tag acl
+sonic-mgmt test run --path tests/ --tag qos
+```
+
+### View Results
+
+```sh
+# View summary
+sonic-mgmt test results --output output/
+
+# Parse detailed report
+sonic-mgmt report parse output/results.xml
+```
+
+### Switch to T1 Testbed
+
+```sh
+# Teardown T0
+sonic-mgmt testbed teardown iol-t0-mlnx
+
+# Deploy T1
+sonic-mgmt testbed deploy iol-t1-brcm
+
+# Run T1 tests
+sonic-mgmt test run --path tests/ --topology t1 -j 4
+```
+
+## Step 6: Daily Operations
+
+### Morning Checklist
+
+```sh
+# Check all testbed health
+sonic-mgmt testbed health iol-t0-mlnx
+sonic-mgmt testbed health iol-t1-brcm
+
+# Verify device connectivity
+sonic-mgmt device list
+```
+
+### Running Nightly Regressions
+
+Create a script for automated nightly runs:
+
+```sh
+#!/bin/bash
+# nightly-regression.sh
+
+set -e
+
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+OUTPUT="output/nightly-${TIMESTAMP}"
+
+echo "=== Nightly Regression: ${TIMESTAMP} ==="
+
+# Deploy T0 testbed
+sonic-mgmt testbed deploy iol-t0-mlnx
+sonic-mgmt testbed health iol-t0-mlnx
+
+# Run full T0 suite
+sonic-mgmt test run --path tests/ --topology t0 -j 4 \
+  --output "${OUTPUT}/t0"
+
+# Teardown T0, deploy T1
+sonic-mgmt testbed teardown iol-t0-mlnx
+sonic-mgmt testbed deploy iol-t1-brcm
+
+# Run full T1 suite
+sonic-mgmt test run --path tests/ --topology t1 -j 4 \
+  --output "${OUTPUT}/t1"
+
+# Upload results
+sonic-mgmt report upload "${OUTPUT}/t0/results.xml"
+sonic-mgmt report upload "${OUTPUT}/t1/results.xml"
+
+# Teardown
+sonic-mgmt testbed teardown iol-t1-brcm
+
+echo "=== Complete ==="
+```
+
+### Troubleshooting a Failed Test
+
+```sh
+# 1. Check device health
+sonic-mgmt testbed health iol-t0-mlnx
+
+# 2. Inspect the DUT
+sonic-mgmt device facts sonic-mlnx-01
+sonic-mgmt device exec sonic-mlnx-01 "show ip bgp summary"
+sonic-mgmt device exec sonic-mlnx-01 "show system status"
+
+# 3. Check logs
+sonic-mgmt device exec sonic-mlnx-01 "show logging last 50"
+
+# 4. If unresponsive, use console
+sonic-mgmt device connect sonic-mlnx-01 --console
+
+# 5. Reboot and redeploy if needed
+sonic-mgmt device reboot sonic-mlnx-01
+sonic-mgmt testbed refresh iol-t0-mlnx
+```
+
+## Network Wiring Diagram
+
+For a T0 topology at the IOL:
+
+```
+  Test Server (test-server-01)
+  ├── VM: ARISTA01T1 (10.250.0.2) ──┐
+  ├── VM: ARISTA02T1 (10.250.0.3) ──┤
+  ├── VM: ARISTA03T1 (10.250.0.4) ──┤  Neighbor
+  ├── VM: ARISTA04T1 (10.250.0.5) ──┤  VMs
+  │                                   │
+  ├── PTF Container (10.0.0.30) ─────┤
+  │                                   │
+  │   Fanout Switch (fanout-01)       │
+  │   ├── VLAN 1001 ─────────────────┤
+  │   ├── VLAN 1002 ─────────────────┤
+  │   ├── ...                        │
+  │   └── VLAN 1032 ─────────────────┘
+  │           │
+  │     SONiC DUT (sonic-mlnx-01)
+  │     ├── Ethernet0..31  ── data ports
+  │     └── eth0           ── mgmt (10.0.0.10)
+  │
+  └── Management Network (10.0.0.0/24)
+```
+
+## Tips for the IOL
+
+1. **Label everything** -- physical ports, cables, rack positions. Map them to your inventory file's metadata fields.
+
+2. **Use console access** -- always configure console server entries in inventory. When a DUT is unreachable via SSH, console is your lifeline.
+
+3. **Pin VM images** -- keep a local copy of known-good vEOS/cEOS images. Don't rely on downloading during testbed deploy.
+
+4. **Separate management and data** -- ensure management network (10.0.0.0/24) is isolated from the data plane. This prevents test traffic from disrupting management access.
+
+5. **Log to file** -- in `sonic-mgmt.toml`, set `logging.file` to capture full logs for post-mortem analysis.
+
+6. **Start with PTF topology** -- when bringing up a new DUT, start with the `ptf` topology (no VMs) to verify basic connectivity before deploying a full T0/T1.
+
+7. **Use health checks liberally** -- run `sonic-mgmt testbed health` before every test run. A degraded testbed wastes test time.
