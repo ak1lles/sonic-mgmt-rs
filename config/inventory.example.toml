@@ -1,0 +1,104 @@
+# =============================================================================
+# SONiC Device Inventory -- Example
+# =============================================================================
+#
+# An inventory is a flat catalogue of every device the framework may need to
+# contact: DUTs, fanout switches, PTF containers, console servers, etc.
+#
+# Validate with:  sonic-mgmt config validate config/inventory.example.toml
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Devices -- keyed by hostname
+# ---------------------------------------------------------------------------
+
+[devices.sonic-switch-1]
+mgmt_ip     = "10.0.0.1"
+device_type = "sonic"
+platform    = "mellanox"
+hwsku       = "ACS-MSN2700"
+
+  [devices.sonic-switch-1.credentials]
+  username = "admin"
+  password = "password"
+
+  [devices.sonic-switch-1.connection]
+  connection_type = "ssh"
+  port            = 22
+
+  [devices.sonic-switch-1.metadata]
+  rack   = "A01"
+  serial = "MLX123456"
+
+[devices.sonic-switch-2]
+mgmt_ip     = "10.0.0.2"
+device_type = "sonic"
+platform    = "broadcom"
+hwsku       = "Force10-S6000"
+
+  [devices.sonic-switch-2.credentials]
+  username = "admin"
+  password = "password"
+
+  [devices.sonic-switch-2.connection]
+  connection_type = "ssh"
+  port            = 22
+
+[devices.fanout-1]
+mgmt_ip     = "10.0.1.1"
+device_type = "fanout"
+platform    = "mellanox"
+hwsku       = "MSN2700"
+
+  [devices.fanout-1.credentials]
+  username = "root"
+  password = "rootpass"
+
+  [devices.fanout-1.connection]
+  connection_type = "ssh"
+  port            = 22
+
+  # Optional out-of-band console access for recovery scenarios.
+  [devices.fanout-1.console]
+  server   = "console-server-1"
+  port     = 3001
+  protocol = "ssh"
+
+[devices.ptf-host]
+mgmt_ip     = "10.255.0.188"
+device_type = "ptf"
+platform    = "virtual"
+hwsku       = "ptf"
+
+  [devices.ptf-host.credentials]
+  username = "root"
+  password = "root"
+
+  [devices.ptf-host.connection]
+  connection_type = "ssh"
+  port            = 22
+
+[devices.eos-neighbor-1]
+mgmt_ip     = "10.250.0.2"
+device_type = "eos"
+platform    = "virtual"
+hwsku       = "vEOS"
+
+  [devices.eos-neighbor-1.credentials]
+  username = "admin"
+  password = "admin"
+
+  [devices.eos-neighbor-1.connection]
+  connection_type = "ssh"
+  port            = 22
+
+# ---------------------------------------------------------------------------
+# Groups -- named collections of hostnames
+# ---------------------------------------------------------------------------
+
+[groups]
+all     = ["sonic-switch-1", "sonic-switch-2", "fanout-1", "ptf-host", "eos-neighbor-1"]
+duts    = ["sonic-switch-1", "sonic-switch-2"]
+fanouts = ["fanout-1"]
+ptf     = ["ptf-host"]
+vms     = ["eos-neighbor-1"]

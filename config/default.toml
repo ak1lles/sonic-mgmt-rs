@@ -1,0 +1,110 @@
+# =============================================================================
+# SONiC Management Framework -- Default Application Configuration
+# =============================================================================
+#
+# Copy this file to `sonic-mgmt.toml` in your project root and customise as
+# needed.  Every key shown below is optional; the framework falls back to the
+# compiled-in defaults when a key is missing.
+#
+# Run `sonic-mgmt config show` to display the effective configuration after
+# merging defaults and overrides.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# [testbed] -- which testbed to target
+# ---------------------------------------------------------------------------
+[testbed]
+
+# Logical name of the active testbed (must match a name in the testbed file).
+# Leave empty to require explicit --testbed on every command.
+active = ""
+
+# Path to the testbed definition file (TOML or YAML).
+# Relative paths are resolved from the working directory.
+file = "testbed.yaml"
+
+# ---------------------------------------------------------------------------
+# [connection] -- SSH / transport-layer defaults
+# ---------------------------------------------------------------------------
+[connection]
+
+# Default SSH port when a per-device override is not specified.
+default_ssh_port = 22
+
+# TCP connect + authentication timeout in seconds.
+timeout_secs = 30
+
+# Number of automatic retries on transient connection failures.
+retries = 3
+
+# Path to a default SSH private key.  Uncomment and set if all devices share
+# the same key; per-device keys in the inventory file take precedence.
+# key_path = "/home/user/.ssh/id_rsa"
+
+# ---------------------------------------------------------------------------
+# [testing] -- test runner tunables
+# ---------------------------------------------------------------------------
+[testing]
+
+# Number of test workers running in parallel.  Set to 1 for sequential
+# execution (safest), or increase for faster CI runs on large testbeds.
+parallel_workers = 1
+
+# Maximum time in seconds that a single test case may run before the runner
+# kills it.  900 s (15 min) is a safe default for most SONiC tests.
+timeout_secs = 900
+
+# Directory where test artefacts (logs, pcaps, JUnit XML) are written.
+output_dir = "output"
+
+# Default report format.  Supported values: junit_xml, json, toml, csv, html.
+report_format = "junit_xml"
+
+# ---------------------------------------------------------------------------
+# [reporting] -- results upload and analytics backend
+# ---------------------------------------------------------------------------
+[reporting]
+
+# URL of the reporting backend (e.g. Azure Data Explorer / Kusto cluster).
+# Leave commented out to disable remote uploads.
+# backend_url = "https://mycluster.kusto.windows.net"
+
+# Authentication method.  Supported values:
+#   app_key, managed_identity, azure_default, azure_cli, device_code,
+#   user_token, app_token
+auth_method = "azure_default"
+
+# Database and table names for the reporting backend.
+database = ""
+table = ""
+
+# ---------------------------------------------------------------------------
+# [topology] -- topology generator parameters
+# ---------------------------------------------------------------------------
+[topology]
+
+# Base management IP for auto-generated neighbor VMs.
+vm_base_ip = "10.250.0.2"
+
+# Starting 802.1Q VLAN ID for topology-generated VLANs.
+vlan_base = 1000
+
+# Starting IP offset for VM interface addressing.
+ip_offset = 1
+
+# ---------------------------------------------------------------------------
+# [logging] -- tracing / log output
+# ---------------------------------------------------------------------------
+[logging]
+
+# Tracing filter directive.  Examples:
+#   "info"                         -- default verbosity
+#   "debug"                        -- more detail
+#   "sonic_testbed=debug,warn"     -- per-crate overrides
+level = "info"
+
+# Optional path to a log file.  When absent logs go to stderr only.
+# file = "/var/log/sonic-mgmt.log"
+
+# Output format: full, compact, pretty, json.
+format = "full"

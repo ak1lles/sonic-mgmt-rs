@@ -1,0 +1,106 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sonic-core",
+    "crates/sonic-config",
+    "crates/sonic-device",
+    "crates/sonic-testbed",
+    "crates/sonic-topology",
+    "crates/sonic-testing",
+    "crates/sonic-reporting",
+    "crates/sonic-sdn",
+    "crates/sonic-mgmt-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.75"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+serde_yaml = "0.9"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+futures = "0.3"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+inquire = "0.7"
+
+# SSH
+russh = "0.46"
+russh-keys = "0.46"
+
+# Networking
+ipnetwork = "0.20"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# HTTP
+reqwest = { version = "0.12", features = ["json"] }
+http = "1"
+
+# gRPC
+tonic = { version = "0.12", features = ["tls"] }
+prost = "0.13"
+prost-types = "0.13"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Templating
+tera = "1"
+
+# Terminal UI
+colored = "2"
+console = "0.15"
+indicatif = "0.17"
+
+# Regex
+regex = "1"
+
+# XML
+quick-xml = { version = "0.37", features = ["serialize"] }
+
+# File patterns
+glob = "0.3"
+
+# Random
+rand = "0.8"
+
+# Derive macros
+derive_builder = "0.20"
+
+# Testing utilities
+tempfile = "3"
+
+# Internal crates
+sonic-core = { path = "crates/sonic-core" }
+sonic-config = { path = "crates/sonic-config" }
+sonic-device = { path = "crates/sonic-device" }
+sonic-testbed = { path = "crates/sonic-testbed" }
+sonic-topology = { path = "crates/sonic-topology" }
+sonic-testing = { path = "crates/sonic-testing" }
+sonic-reporting = { path = "crates/sonic-reporting" }
+sonic-sdn = { path = "crates/sonic-sdn" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

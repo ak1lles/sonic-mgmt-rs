@@ -1,0 +1,78 @@
+# =============================================================================
+# SONiC Testbed Definition -- Example (t0 topology with 2 DUTs)
+# =============================================================================
+#
+# This file defines a single testbed entry.  Place it (or multiple entries in
+# a YAML list) in the path referenced by [testbed].file in sonic-mgmt.toml.
+#
+# Validate with:  sonic-mgmt config validate config/testbed.example.toml
+# =============================================================================
+
+# Unique name for this testbed.
+name = "vms-t0"
+
+# Optional logical group (used for CI partitioning).
+group = "vms"
+
+# Topology type to deploy.
+# Supported values: t0, t0_64, t0_116, t1, t1_64, t1_lag, t2,
+#                   dualtor, mgmt_tor, m0_vlan, ptf_32, ptf_64, ptf, any
+topo = "t0"
+
+# Docker image name for the PTF container.
+ptf_image = "docker-ptf"
+
+# Management IP address of the PTF container.
+ptf_ip = "10.255.0.188"
+
+# Physical server (hypervisor) hosting the VMs.
+server = "server-1"
+
+# Base name for neighbor VMs.  The topology generator appends an offset
+# (e.g. VM0100, VM0101, ...).
+vm_base = "VM0100"
+
+# Free-form comment.
+comment = "Example T0 testbed with two DUTs"
+
+# ---------------------------------------------------------------------------
+# DUTs (devices under test)
+# ---------------------------------------------------------------------------
+
+[[duts]]
+hostname = "sonic-dut-1"
+mgmt_ip  = "10.0.0.1"
+hwsku    = "ACS-MSN2700"
+platform = "mellanox"
+
+  [duts.credentials]
+  username = "admin"
+  password = "password"
+  # key_path = "/home/user/.ssh/id_rsa"
+
+[[duts]]
+hostname = "sonic-dut-2"
+mgmt_ip  = "10.0.0.2"
+hwsku    = "Force10-S6000"
+platform = "broadcom"
+
+  [duts.credentials]
+  username = "admin"
+  password = "password"
+
+# ---------------------------------------------------------------------------
+# Neighbor VMs (optional -- auto-generated from topology when omitted)
+# ---------------------------------------------------------------------------
+
+# [[neighbors]]
+# hostname = "ARISTA01T1"
+# vm_type  = "veos"
+# mgmt_ip  = "10.250.0.2"
+
+# ---------------------------------------------------------------------------
+# Arbitrary metadata
+# ---------------------------------------------------------------------------
+
+[metadata]
+owner   = "sonic-team"
+purpose = "nightly regression"

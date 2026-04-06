@@ -1,0 +1,21 @@
+[package]
+name = "sonic-topology"
+description = "Network topology generation and management for SONiC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sonic-core = { workspace = true }
+sonic-config = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+ipnetwork = { workspace = true }
+rand = { workspace = true }
+tera = { workspace = true }
