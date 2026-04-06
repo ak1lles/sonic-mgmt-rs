@@ -1,80 +1,23 @@
 ---
-title: Introduction
-description: A Rust-based network management framework for SONiC switches
+title: sonic-mgmt-rs
+description: Rust-based network management framework for SONiC switches
 ---
 
-## What is sonic-mgmt-rs?
+## Crates
 
-**sonic-mgmt-rs** is a complete Rust rewrite of the Python-based [sonic-mgmt](https://github.com/sonic-net/sonic-mgmt) framework. It provides a unified CLI tool for managing SONiC (Software for Open Networking in the Cloud) network switches, testbeds, topologies, test execution, and SDN operations.
-
-This tool is designed for network engineers and test teams at labs like the **UNH InterOperability Laboratory** who need to manage SONiC switch testbeds, run conformance and regression tests, and report results.
-
-## Why Rust?
-
-The original `sonic-mgmt` is a large Python codebase with Ansible playbooks. This rewrite provides:
-
-- **Type safety** -- catch configuration and wiring errors at compile time, not during a 2-hour test run
-- **Performance** -- concurrent device operations, connection pooling, and zero-cost abstractions
-- **Single binary** -- no Python virtualenvs, no Ansible, no pip dependency conflicts. One `sonic-mgmt` binary does everything
-- **Interactive wizards** -- guided setup for testbeds, devices, and test runs instead of manually editing YAML files
-
-## Key Capabilities
-
-| Capability | Description |
+| Crate | Description |
 |---|---|
-| **Testbed Management** | Deploy, teardown, health-check, and upgrade SONiC testbeds |
-| **Device Operations** | SSH/Telnet/Console into SONiC, EOS, Cisco, and PTF devices. Collect facts, run commands, reboot |
-| **Topology Generation** | Generate T0, T1, T2, Dualtor, and PTF topologies with automatic IP/VLAN/VM allocation |
-| **Test Execution** | Discover, filter, and run tests with parallel workers, fixtures, and timeouts |
-| **Reporting** | Parse JUnit XML, track SAI/SWSS coverage, upload results to Azure Data Explorer (Kusto) |
-| **SDN Protocols** | gNMI Get/Set/Subscribe, gNOI reboot/ping, P4Runtime table management |
+| [sonic-core](/docs/sonic-core) | Core types, traits, and error definitions |
+| [sonic-config](/docs/sonic-config) | TOML/YAML configuration loading and validation |
+| [sonic-device](/docs/sonic-device) | Device abstraction layer with SSH, Telnet, and console transport |
+| [sonic-testbed](/docs/sonic-testbed) | Testbed management, provisioning, and lifecycle |
+| [sonic-topology](/docs/sonic-topology) | Network topology generation and rendering |
+| [sonic-testing](/docs/sonic-testing) | Test discovery, execution, and result collection |
+| [sonic-reporting](/docs/sonic-reporting) | JUnit XML parsing, test analytics, and coverage reporting |
+| [sonic-sdn](/docs/sonic-sdn) | SDN protocol clients for gNMI, gNOI, and P4Runtime |
+| [sonic-mgmt-cli](/docs/sonic-mgmt-cli) | CLI binary tying everything together |
+| [sonic-integration-tests](/docs/sonic-integration-tests) | Integration tests against live SONiC devices |
 
-## Quick Start
+## API Reference
 
-```sh
-# Build from source
-cargo build --release
-
-# Run the first-time setup wizard
-sonic-mgmt init
-
-# Create a testbed interactively
-sonic-mgmt testbed wizard
-
-# Deploy a topology
-sonic-mgmt testbed deploy my-testbed
-
-# Run tests
-sonic-mgmt test run --path tests/
-```
-
-## Project Structure
-
-The project is organized as a Cargo workspace with 9 functional crates plus an integration test crate:
-
-```
-sonic-mgmt-rs/
-├── crates/
-│   ├── sonic-core/          # Shared types, traits, errors
-│   ├── sonic-config/        # TOML/YAML configuration
-│   ├── sonic-device/        # SSH/Telnet/Console + device hosts
-│   ├── sonic-testbed/       # Testbed lifecycle management
-│   ├── sonic-topology/      # Topology generation & rendering
-│   ├── sonic-testing/       # Test discovery & execution
-│   ├── sonic-reporting/     # JUnit parsing & report upload
-│   ├── sonic-sdn/           # gNMI, gNOI, P4Runtime clients
-│   ├── sonic-mgmt-cli/      # The `sonic-mgmt` CLI binary
-│   └── sonic-integration-tests/
-├── config/                  # Example configuration files
-├── docker/                  # Test runner container
-└── Makefile.toml            # cargo-make task definitions
-```
-
-## Next Steps
-
-<Cards>
-  <Card title="Installation" href="/docs/getting-started/installation" />
-  <Card title="Architecture" href="/docs/architecture" />
-  <Card title="Configuration" href="/docs/configuration" />
-  <Card title="UNH IOL Setup" href="/docs/guides/unh-iol-setup" />
-</Cards>
+Browse the full [rustdoc API reference](/api/sonic_core/index.html).

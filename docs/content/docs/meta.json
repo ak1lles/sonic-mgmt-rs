@@ -1,17 +1,17 @@
 {
   "title": "Documentation",
   "pages": [
-    "---Introduction---",
     "index",
-    "---Getting Started---",
-    "getting-started",
-    "---Reference---",
-    "architecture",
-    "configuration",
-    "cli",
-    "---Guides---",
-    "guides",
-    "---Development---",
-    "development"
+    "---Crates---",
+    "sonic-core",
+    "sonic-config",
+    "sonic-device",
+    "sonic-testbed",
+    "sonic-topology",
+    "sonic-testing",
+    "sonic-reporting",
+    "sonic-sdn",
+    "sonic-mgmt-cli",
+    "sonic-integration-tests"
   ]
 }

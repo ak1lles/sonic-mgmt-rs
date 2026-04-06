@@ -65,6 +65,17 @@ args = [
     "--", "--ignored", "--test-threads=1",
 ]
 
+[tasks.docs]
+description = "Generate documentation from rustdoc comments"
+command = "bash"
+args = ["docs/scripts/generate.sh"]
+
+[tasks.docs-serve]
+description = "Generate docs and start the dev server"
+dependencies = ["docs"]
+command = "npm"
+args = ["--prefix", "docs", "run", "dev"]
+
 [tasks.ci]
 description = "CI: lint + unit tests (integration requires testbed)"
 command = "cargo"
