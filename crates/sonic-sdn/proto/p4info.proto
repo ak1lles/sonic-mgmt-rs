@@ -1,0 +1,61 @@
+syntax = "proto3";
+package p4.config.v1;
+
+message P4Info {
+  PkgInfo pkg_info = 1;
+  repeated Table tables = 2;
+  repeated Action actions = 3;
+  repeated Counter counters = 7;
+}
+
+message PkgInfo {
+  string name = 1;
+  string version = 2;
+  string arch = 3;
+}
+
+message Table {
+  Preamble preamble = 1;
+  repeated MatchField match_fields = 2;
+  repeated ActionRef action_refs = 3;
+  int64 size = 4;
+}
+
+message Preamble {
+  uint32 id = 1;
+  string name = 2;
+  string alias = 3;
+}
+
+message MatchField {
+  uint32 id = 1;
+  string name = 2;
+  enum MatchType {
+    UNSPECIFIED = 0;
+    EXACT = 2;
+    LPM = 3;
+    TERNARY = 4;
+    RANGE = 5;
+    OPTIONAL = 6;
+  }
+  MatchType match_type = 5;
+}
+
+message ActionRef {
+  uint32 id = 1;
+}
+
+message Action {
+  Preamble preamble = 1;
+  repeated Param params = 2;
+  message Param {
+    uint32 id = 1;
+    string name = 2;
+    int32 bitwidth = 3;
+  }
+}
+
+message Counter {
+  Preamble preamble = 1;
+  int64 size = 2;
+}

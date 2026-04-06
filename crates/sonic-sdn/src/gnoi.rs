@@ -2,14 +2,19 @@
 //!
 //! Implements operational RPCs for device management: reboot, time sync,
 //! ping/traceroute, certificate rotation, file transfer, and OS management.
+//! The System service RPCs use generated tonic stubs for proper protobuf
+//! serialization; other services (cert, file, OS) remain as stub placeholders
+//! until their proto definitions are added.
 
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use sonic_core::{Result, SonicError};
+
+use crate::proto::gnoi_system as pb;
 
 // ---------------------------------------------------------------------------
 // Supporting types
@@ -29,6 +34,18 @@ pub enum RebootMethod {
     PowerCycle,
     /// NSF (Non-Stop Forwarding) restart.
     Nsf,
+}
+
+impl RebootMethod {
+    fn to_proto(self) -> i32 {
+        match self {
+            Self::Cold => pb::RebootMethod::Cold as i32,
+            Self::Warm => pb::RebootMethod::Warm as i32,
+            Self::Fast => pb::RebootMethod::Cold as i32, // No "fast" in proto; use cold
+            Self::PowerCycle => pb::RebootMethod::Powerdown as i32,
+            Self::Nsf => pb::RebootMethod::Nsf as i32,
+        }
+    }
 }
 
 /// Result of a ping operation.
@@ -185,40 +202,14 @@ impl GnoiClient {
         })
     }
 
-    /// Verifies the channel is ready and sends a JSON-encoded gRPC request.
-    ///
-    /// In a full deployment with generated proto stubs, this would be replaced
-    /// by typed RPC calls. The channel establishment and readiness check are
-    /// real; the RPC dispatch requires proto codegen.
-    async fn grpc_call(
-        &self,
-        method: &str,
-        request: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let channel = self.channel()?;
-
-        let mut client = tonic::client::Grpc::new(channel.clone());
-        client.ready().await.map_err(|e| {
-            SonicError::Grpc(format!("channel not ready: {e}"))
-        })?;
-
-        debug!(
-            method,
-            endpoint = %self.endpoint,
-            "gNOI RPC (channel ready, requires proto stubs for dispatch)"
-        );
-
-        let _ = request;
-
-        Err(SonicError::Grpc(format!(
-            "gNOI method {method} requires generated proto stubs; \
-             channel to {} is established and ready",
-            self.endpoint
-        )))
+    /// Builds a generated gNOI System client from the current channel.
+    fn system_client(&self) -> Result<pb::system_client::SystemClient<Channel>> {
+        let channel = self.channel()?.clone();
+        Ok(pb::system_client::SystemClient::new(channel))
     }
 
     // -----------------------------------------------------------------------
-    // System service RPCs
+    // System service RPCs (using generated stubs)
     // -----------------------------------------------------------------------
 
     /// Triggers a device reboot.
@@ -234,13 +225,19 @@ impl GnoiClient {
             "issuing system reboot"
         );
 
-        let request = serde_json::json!({
-            "method": method,
-            "delay": delay_secs,
-            "message": format!("gNOI reboot: {:?}", method),
-        });
+        let request = pb::RebootRequest {
+            method: method.to_proto(),
+            delay: delay_secs,
+            message: format!("gNOI reboot: {method:?}"),
+            subcomponents: Vec::new(),
+            force: false,
+        };
 
-        self.grpc_call("/gnoi.system.System/Reboot", request).await?;
+        let mut client = self.system_client()?;
+        client.reboot(request).await.map_err(|e| {
+            SonicError::Grpc(format!("gNOI Reboot failed: {e}"))
+        })?;
+
         info!(method = ?method, "reboot command accepted");
         Ok(())
     }
@@ -249,12 +246,13 @@ impl GnoiClient {
     pub async fn system_time(&self) -> Result<chrono::DateTime<chrono::Utc>> {
         debug!(endpoint = %self.endpoint, "querying system time");
 
-        let resp = self
-            .grpc_call("/gnoi.system.System/Time", serde_json::json!({}))
-            .await?;
+        let mut client = self.system_client()?;
+        let response = client.time(pb::TimeRequest {}).await.map_err(|e| {
+            SonicError::Grpc(format!("gNOI Time failed: {e}"))
+        })?;
 
-        let nanos = resp["time"].as_i64().unwrap_or(0);
-        let secs = nanos / 1_000_000_000;
+        let nanos = response.into_inner().time;
+        let secs = (nanos / 1_000_000_000) as i64;
         let nsecs = (nanos % 1_000_000_000) as u32;
 
         let dt = chrono::DateTime::from_timestamp(secs, nsecs)
@@ -277,24 +275,51 @@ impl GnoiClient {
             "executing ping"
         );
 
-        let request = serde_json::json!({
-            "destination": destination,
-            "count": count,
-            "wait": 1,
-        });
+        let request = pb::PingRequest {
+            destination: destination.to_owned(),
+            source: String::new(),
+            count: count as i32,
+            interval: 0,
+            wait: 1,
+            size: 0,
+            do_not_fragment: false,
+            do_not_resolve: false,
+            l3protocol: String::new(),
+        };
 
-        let resp = self
-            .grpc_call("/gnoi.system.System/Ping", request)
-            .await?;
+        let mut client = self.system_client()?;
+        let response = client.ping(request).await.map_err(|e| {
+            SonicError::Grpc(format!("gNOI Ping failed: {e}"))
+        })?;
+
+        // Ping is a server-streaming RPC. Collect all responses and build an
+        // aggregate PingResult from the final summary message.
+        let mut stream = response.into_inner();
+        let mut last_resp: Option<pb::PingResponse> = None;
+
+        while let Some(msg) = stream.message().await.map_err(|e| {
+            SonicError::Grpc(format!("ping stream error: {e}"))
+        })? {
+            last_resp = Some(msg);
+        }
+
+        let resp = last_resp.unwrap_or_default();
+        let sent = if resp.sent > 0 { resp.sent as u32 } else { count };
+        let received = resp.received as u32;
+        let loss = if sent > 0 {
+            ((sent - received) as f64 / sent as f64) * 100.0
+        } else {
+            100.0
+        };
 
         Ok(PingResult {
             destination: destination.to_owned(),
-            sent: resp["sent"].as_u64().unwrap_or(count as u64) as u32,
-            received: resp["received"].as_u64().unwrap_or(0) as u32,
-            min_rtt_ms: resp["min_rtt_ms"].as_f64().unwrap_or(0.0),
-            avg_rtt_ms: resp["avg_rtt_ms"].as_f64().unwrap_or(0.0),
-            max_rtt_ms: resp["max_rtt_ms"].as_f64().unwrap_or(0.0),
-            packet_loss_pct: resp["packet_loss_pct"].as_f64().unwrap_or(100.0),
+            sent,
+            received,
+            min_rtt_ms: resp.min_time as f64,
+            avg_rtt_ms: resp.avg_time as f64,
+            max_rtt_ms: resp.max_time as f64,
+            packet_loss_pct: loss,
         })
     }
 
@@ -309,33 +334,39 @@ impl GnoiClient {
             "executing traceroute"
         );
 
-        let request = serde_json::json!({
-            "destination": destination,
-            "max_ttl": 30,
-            "wait": 2,
-        });
+        let request = pb::TracerouteRequest {
+            destination: destination.to_owned(),
+            source: String::new(),
+            initial_ttl: 1,
+            max_ttl: 30,
+            wait: 2,
+            do_not_fragment: false,
+            do_not_resolve: false,
+            l3protocol: String::new(),
+            do_not_lookup: false,
+        };
 
-        let resp = self
-            .grpc_call("/gnoi.system.System/Traceroute", request)
-            .await?;
+        let mut client = self.system_client()?;
+        let response = client.traceroute(request).await.map_err(|e| {
+            SonicError::Grpc(format!("gNOI Traceroute failed: {e}"))
+        })?;
 
-        let hops = resp["hops"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .enumerate()
-                    .map(|(i, hop)| TracerouteHop {
-                        hop: (i + 1) as u32,
-                        address: hop["address"].as_str().unwrap_or("").to_owned(),
-                        hostname: hop["hostname"].as_str().map(|s| s.to_owned()),
-                        rtt_ms: hop["rtt_ms"]
-                            .as_array()
-                            .map(|a| a.iter().filter_map(|v| v.as_f64()).collect())
-                            .unwrap_or_default(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Traceroute is a server-streaming RPC. Each message contains one hop.
+        let mut stream = response.into_inner();
+        let mut hops = Vec::new();
+
+        while let Some(msg) = stream.message().await.map_err(|e| {
+            SonicError::Grpc(format!("traceroute stream error: {e}"))
+        })? {
+            if let Some(hop) = msg.hop {
+                hops.push(TracerouteHop {
+                    hop: (hop.index + 1) as u32,
+                    address: hop.address.clone(),
+                    hostname: if hop.name.is_empty() { None } else { Some(hop.name) },
+                    rtt_ms: vec![hop.rtt as f64 / 1000.0],
+                });
+            }
+        }
 
         Ok(TracerouteResult {
             destination: destination.to_owned(),
@@ -344,7 +375,7 @@ impl GnoiClient {
     }
 
     // -----------------------------------------------------------------------
-    // Certificate service RPCs
+    // Certificate service RPCs (no proto definition yet)
     // -----------------------------------------------------------------------
 
     /// Rotates TLS certificates on the device.
@@ -359,20 +390,18 @@ impl GnoiClient {
             "rotating TLS certificate"
         );
 
-        let request = serde_json::json!({
-            "certificate": base64_encode(cert_pem),
-            "key": base64_encode(key_pem),
-        });
+        let _ = (cert_pem, key_pem);
+        self.channel()?;
 
-        self.grpc_call("/gnoi.cert.CertificateManagement/Rotate", request)
-            .await?;
-
-        info!("certificate rotation complete");
-        Ok(())
+        Err(SonicError::Grpc(
+            "gNOI CertificateManagement service requires proto definitions \
+             not yet included in this crate"
+                .to_owned(),
+        ))
     }
 
     // -----------------------------------------------------------------------
-    // File service RPCs
+    // File service RPCs (no proto definition yet)
     // -----------------------------------------------------------------------
 
     /// Downloads a file from the device.
@@ -383,17 +412,13 @@ impl GnoiClient {
             "downloading file from device"
         );
 
-        let request = serde_json::json!({ "remote_file": remote_path });
+        self.channel()?;
 
-        let resp = self.grpc_call("/gnoi.file.File/Get", request).await?;
-
-        let data = resp["contents"]
-            .as_str()
-            .map(base64_decode)
-            .unwrap_or_default();
-
-        debug!(path = remote_path, size = data.len(), "file downloaded");
-        Ok(data)
+        Err(SonicError::Grpc(
+            "gNOI File service requires proto definitions not yet included \
+             in this crate"
+                .to_owned(),
+        ))
     }
 
     /// Uploads a file to the device.
@@ -409,19 +434,17 @@ impl GnoiClient {
             "uploading file to device"
         );
 
-        let request = serde_json::json!({
-            "remote_file": remote_path,
-            "contents": base64_encode(local_data),
-        });
+        self.channel()?;
 
-        self.grpc_call("/gnoi.file.File/Put", request).await?;
-
-        info!(remote_path, "file uploaded");
-        Ok(())
+        Err(SonicError::Grpc(
+            "gNOI File service requires proto definitions not yet included \
+             in this crate"
+                .to_owned(),
+        ))
     }
 
     // -----------------------------------------------------------------------
-    // OS service RPCs
+    // OS service RPCs (no proto definition yet)
     // -----------------------------------------------------------------------
 
     /// Installs a new OS image on the device.
@@ -437,29 +460,13 @@ impl GnoiClient {
             "installing OS image"
         );
 
-        let request = serde_json::json!({
-            "image_url": image_url,
-            "version": version,
-        });
+        self.channel()?;
 
-        let resp = self.grpc_call("/gnoi.os.OS/Install", request).await?;
-
-        let result = OsInstallResult {
-            version: version.to_owned(),
-            success: resp["success"].as_bool().unwrap_or(false),
-            message: resp["message"]
-                .as_str()
-                .unwrap_or("no message")
+        Err(SonicError::Grpc(
+            "gNOI OS service requires proto definitions not yet included \
+             in this crate"
                 .to_owned(),
-        };
-
-        if result.success {
-            info!(version, "OS installation successful");
-        } else {
-            warn!(version, message = %result.message, "OS installation failed");
-        }
-
-        Ok(result)
+        ))
     }
 
     /// Activates an installed OS version.
@@ -470,11 +477,13 @@ impl GnoiClient {
             "activating OS version"
         );
 
-        let request = serde_json::json!({ "version": version });
-        self.grpc_call("/gnoi.os.OS/Activate", request).await?;
+        self.channel()?;
 
-        info!(version, "OS version activated");
-        Ok(())
+        Err(SonicError::Grpc(
+            "gNOI OS service requires proto definitions not yet included \
+             in this crate"
+                .to_owned(),
+        ))
     }
 
     /// Returns whether the client is connected.
@@ -483,85 +492,78 @@ impl GnoiClient {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Base64-encodes a byte slice.
-fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut encoded = String::with_capacity((data.len() + 2) / 3 * 4);
-
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-
-        encoded.push(ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
-        encoded.push(ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
-
-        if chunk.len() > 1 {
-            encoded.push(ALPHABET[((triple >> 6) & 0x3F) as usize] as char);
-        } else {
-            encoded.push('=');
-        }
-
-        if chunk.len() > 2 {
-            encoded.push(ALPHABET[(triple & 0x3F) as usize] as char);
-        } else {
-            encoded.push('=');
-        }
-    }
-
-    encoded
-}
-
-/// Base64-decodes a string.
-fn base64_decode(data: &str) -> Vec<u8> {
-    fn decode_char(c: u8) -> Option<u8> {
-        match c {
-            b'A'..=b'Z' => Some(c - b'A'),
-            b'a'..=b'z' => Some(c - b'a' + 26),
-            b'0'..=b'9' => Some(c - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-
-    let bytes: Vec<u8> = data.bytes().filter(|b| *b != b'=').collect();
-    let mut result = Vec::with_capacity(bytes.len() * 3 / 4);
-
-    for chunk in bytes.chunks(4) {
-        let vals: Vec<u8> = chunk.iter().filter_map(|&b| decode_char(b)).collect();
-        if vals.is_empty() {
-            continue;
-        }
-
-        let n = vals.len();
-        let triple = (vals[0] as u32) << 18
-            | vals.get(1).map(|&v| (v as u32) << 12).unwrap_or(0)
-            | vals.get(2).map(|&v| (v as u32) << 6).unwrap_or(0)
-            | vals.get(3).map(|&v| v as u32).unwrap_or(0);
-
-        result.push((triple >> 16) as u8);
-        if n > 2 {
-            result.push((triple >> 8) as u8);
-        }
-        if n > 3 {
-            result.push(triple as u8);
-        }
-    }
-
-    result
-}
-
 #[cfg(test)]
 mod tests {
+    fn base64_encode(data: &[u8]) -> String {
+        const ALPHABET: &[u8] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+        let mut encoded = String::with_capacity((data.len() + 2) / 3 * 4);
+
+        for chunk in data.chunks(3) {
+            let b0 = chunk[0] as u32;
+            let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+            let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+
+            let triple = (b0 << 16) | (b1 << 8) | b2;
+
+            encoded.push(ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
+            encoded.push(ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
+
+            if chunk.len() > 1 {
+                encoded.push(ALPHABET[((triple >> 6) & 0x3F) as usize] as char);
+            } else {
+                encoded.push('=');
+            }
+
+            if chunk.len() > 2 {
+                encoded.push(ALPHABET[(triple & 0x3F) as usize] as char);
+            } else {
+                encoded.push('=');
+            }
+        }
+
+        encoded
+    }
+
+    fn base64_decode(data: &str) -> Vec<u8> {
+        fn decode_char(c: u8) -> Option<u8> {
+            match c {
+                b'A'..=b'Z' => Some(c - b'A'),
+                b'a'..=b'z' => Some(c - b'a' + 26),
+                b'0'..=b'9' => Some(c - b'0' + 52),
+                b'+' => Some(62),
+                b'/' => Some(63),
+                _ => None,
+            }
+        }
+
+        let bytes: Vec<u8> = data.bytes().filter(|b| *b != b'=').collect();
+        let mut result = Vec::with_capacity(bytes.len() * 3 / 4);
+
+        for chunk in bytes.chunks(4) {
+            let vals: Vec<u8> = chunk.iter().filter_map(|&b| decode_char(b)).collect();
+            if vals.is_empty() {
+                continue;
+            }
+
+            let n = vals.len();
+            let triple = (vals[0] as u32) << 18
+                | vals.get(1).map(|&v| (v as u32) << 12).unwrap_or(0)
+                | vals.get(2).map(|&v| (v as u32) << 6).unwrap_or(0)
+                | vals.get(3).map(|&v| v as u32).unwrap_or(0);
+
+            result.push((triple >> 16) as u8);
+            if n > 2 {
+                result.push((triple >> 8) as u8);
+            }
+            if n > 3 {
+                result.push(triple as u8);
+            }
+        }
+
+        result
+    }
     use super::*;
 
     #[test]
@@ -647,5 +649,16 @@ mod tests {
         let deserialized: OsInstallResult = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.version, "20240101.1");
         assert!(deserialized.success);
+    }
+
+    #[test]
+    fn reboot_method_to_proto() {
+        assert_eq!(RebootMethod::Cold.to_proto(), pb::RebootMethod::Cold as i32);
+        assert_eq!(RebootMethod::Warm.to_proto(), pb::RebootMethod::Warm as i32);
+        assert_eq!(RebootMethod::Nsf.to_proto(), pb::RebootMethod::Nsf as i32);
+        assert_eq!(
+            RebootMethod::PowerCycle.to_proto(),
+            pb::RebootMethod::Powerdown as i32
+        );
     }
 }

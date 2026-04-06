@@ -1,8 +1,18 @@
-/// Minimal build script for the sonic-sdn crate.
-///
-/// The gNMI, gNOI, and P4Runtime protobuf message types are modeled as plain
-/// Rust structs rather than generated from `.proto` files via `tonic-build`.
-/// This avoids a build-time dependency on protoc and the proto definitions.
-fn main() {
-    // No codegen required. Proto types are hand-modeled in the source.
+/// Build script that compiles gNMI, gNOI, and P4Runtime proto definitions
+/// into Rust types and tonic service clients.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let proto_files = [
+        "proto/gnmi.proto",
+        "proto/gnoi.proto",
+        "proto/gnoi_types.proto",
+        "proto/p4runtime.proto",
+        "proto/p4info.proto",
+        "proto/google/rpc/status.proto",
+    ];
+
+    tonic_build::configure()
+        .build_server(false)
+        .compile_protos(&proto_files, &["proto"])?;
+
+    Ok(())
 }

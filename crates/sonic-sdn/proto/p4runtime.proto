@@ -1,0 +1,173 @@
+syntax = "proto3";
+package p4.v1;
+
+import "p4info.proto";
+import "google/rpc/status.proto";
+
+service P4Runtime {
+  rpc Write(WriteRequest) returns (WriteResponse);
+  rpc Read(ReadRequest) returns (stream ReadResponse);
+  rpc SetForwardingPipelineConfig(SetForwardingPipelineConfigRequest) returns (SetForwardingPipelineConfigResponse);
+  rpc GetForwardingPipelineConfig(GetForwardingPipelineConfigRequest) returns (GetForwardingPipelineConfigResponse);
+  rpc StreamChannel(stream StreamMessageRequest) returns (stream StreamMessageResponse);
+}
+
+message WriteRequest {
+  uint64 device_id = 1;
+  Uint128 election_id = 3;
+  repeated Update updates = 4;
+}
+
+message WriteResponse {}
+
+message ReadRequest {
+  uint64 device_id = 1;
+  repeated Entity entities = 2;
+}
+
+message ReadResponse {
+  repeated Entity entities = 1;
+}
+
+message Update {
+  enum Type {
+    UNSPECIFIED = 0;
+    INSERT = 1;
+    MODIFY = 2;
+    DELETE = 3;
+  }
+  Type type = 1;
+  Entity entity = 2;
+}
+
+message Entity {
+  oneof entity {
+    TableEntry table_entry = 2;
+    CounterEntry counter_entry = 3;
+    DirectCounterEntry direct_counter_entry = 7;
+  }
+}
+
+message TableEntry {
+  uint32 table_id = 1;
+  repeated FieldMatch match = 2;
+  TableAction action = 3;
+  int32 priority = 4;
+  uint64 controller_metadata = 5;
+  bool is_default_action = 8;
+  int64 idle_timeout_ns = 9;
+  CounterData counter_data = 10;
+}
+
+message FieldMatch {
+  uint32 field_id = 1;
+  oneof field_match_type {
+    Exact exact = 2;
+    Ternary ternary = 3;
+    LPM lpm = 4;
+    Range range = 6;
+    Optional optional = 7;
+  }
+
+  message Exact { bytes value = 1; }
+  message Ternary { bytes value = 1; bytes mask = 2; }
+  message LPM { bytes value = 1; int32 prefix_len = 2; }
+  message Range { bytes low = 1; bytes high = 2; }
+  message Optional { bytes value = 1; }
+}
+
+message TableAction {
+  oneof type {
+    Action action = 1;
+  }
+}
+
+message Action {
+  uint32 action_id = 1;
+  repeated Param params = 4;
+  message Param {
+    uint32 param_id = 2;
+    bytes value = 3;
+  }
+}
+
+message CounterEntry {
+  uint32 counter_id = 1;
+  Index index = 2;
+  CounterData data = 3;
+}
+
+message DirectCounterEntry {
+  TableEntry table_entry = 1;
+  CounterData data = 2;
+}
+
+message Index {
+  int64 index = 1;
+}
+
+message CounterData {
+  int64 byte_count = 1;
+  int64 packet_count = 2;
+}
+
+message Uint128 {
+  uint64 high = 1;
+  uint64 low = 2;
+}
+
+message SetForwardingPipelineConfigRequest {
+  uint64 device_id = 1;
+  Uint128 election_id = 3;
+  enum Action {
+    UNSPECIFIED = 0;
+    VERIFY = 1;
+    VERIFY_AND_SAVE = 2;
+    VERIFY_AND_COMMIT = 3;
+    COMMIT = 4;
+    RECONCILE_AND_COMMIT = 5;
+  }
+  Action action = 4;
+  ForwardingPipelineConfig config = 5;
+}
+
+message SetForwardingPipelineConfigResponse {}
+
+message GetForwardingPipelineConfigRequest {
+  uint64 device_id = 1;
+  enum ResponseType {
+    ALL = 0;
+    COOKIE_ONLY = 1;
+    P4INFO_AND_COOKIE = 2;
+    DEVICE_CONFIG_AND_COOKIE = 3;
+  }
+  ResponseType response_type = 2;
+}
+
+message GetForwardingPipelineConfigResponse {
+  ForwardingPipelineConfig config = 1;
+}
+
+message ForwardingPipelineConfig {
+  p4.config.v1.P4Info p4info = 1;
+  bytes p4_device_config = 2;
+  bytes cookie = 3;
+}
+
+message StreamMessageRequest {
+  oneof update {
+    MasterArbitrationUpdate arbitration = 1;
+  }
+}
+
+message StreamMessageResponse {
+  oneof update {
+    MasterArbitrationUpdate arbitration = 1;
+  }
+}
+
+message MasterArbitrationUpdate {
+  uint64 device_id = 1;
+  Uint128 election_id = 2;
+  google.rpc.Status status = 3;
+}

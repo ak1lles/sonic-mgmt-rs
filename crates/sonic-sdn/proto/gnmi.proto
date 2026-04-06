@@ -1,0 +1,154 @@
+syntax = "proto3";
+package gnmi;
+
+service gNMI {
+  rpc Capabilities(CapabilityRequest) returns (CapabilityResponse);
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Set(SetRequest) returns (SetResponse);
+  rpc Subscribe(stream SubscribeRequest) returns (stream SubscribeResponse);
+}
+
+message Path {
+  repeated PathElem elem = 1;
+  string origin = 2;
+  string target = 3;
+}
+
+message PathElem {
+  string name = 1;
+  map<string, string> key = 2;
+}
+
+message TypedValue {
+  oneof value {
+    string string_val = 1;
+    int64 int_val = 2;
+    uint64 uint_val = 3;
+    bool bool_val = 4;
+    bytes bytes_val = 5;
+    float float_val = 6;
+    double double_val = 7;
+    bytes json_ietf_val = 8;
+    bytes json_val = 9;
+    bytes proto_bytes = 10;
+    ScalarArray leaflist_val = 11;
+    bytes any_val = 12;
+  }
+}
+
+message ScalarArray {
+  repeated TypedValue element = 1;
+}
+
+message Update {
+  Path path = 1;
+  TypedValue val = 3;
+}
+
+message Notification {
+  int64 timestamp = 1;
+  Path prefix = 2;
+  repeated Update update = 4;
+  repeated Path delete = 5;
+}
+
+message GetRequest {
+  repeated Path path = 1;
+  Encoding encoding = 5;
+  Path prefix = 2;
+  DataType type = 3;
+}
+
+message GetResponse {
+  repeated Notification notification = 1;
+}
+
+message SetRequest {
+  Path prefix = 1;
+  repeated Update delete = 2;
+  repeated Update replace = 3;
+  repeated Update update = 4;
+}
+
+message SetResponse {
+  Path prefix = 1;
+  repeated UpdateResult response = 2;
+  int64 timestamp = 4;
+}
+
+message UpdateResult {
+  Path path = 1;
+  Operation op = 3;
+  string message = 4;
+}
+
+enum Operation {
+  INVALID = 0;
+  DELETE = 1;
+  REPLACE = 2;
+  UPDATE = 3;
+}
+
+message SubscribeRequest {
+  oneof request {
+    SubscriptionList subscribe = 1;
+    Poll poll = 3;
+  }
+}
+
+message Poll {}
+
+message SubscriptionList {
+  Path prefix = 1;
+  repeated Subscription subscription = 2;
+  SubscriptionMode mode = 5;
+  Encoding encoding = 6;
+}
+
+message Subscription {
+  Path path = 1;
+  SubscriptionMode mode = 2;
+  uint64 sample_interval = 3;
+}
+
+message SubscribeResponse {
+  oneof response {
+    Notification update = 1;
+    bool sync_response = 3;
+  }
+}
+
+message CapabilityRequest {}
+
+message CapabilityResponse {
+  repeated ModelData supported_models = 1;
+  repeated Encoding supported_encodings = 2;
+  string gNMI_version = 3;
+}
+
+message ModelData {
+  string name = 1;
+  string organization = 2;
+  string version = 3;
+}
+
+enum Encoding {
+  JSON = 0;
+  BYTES = 1;
+  PROTO = 2;
+  ASCII = 3;
+  JSON_IETF = 4;
+}
+
+enum DataType {
+  ALL = 0;
+  CONFIG = 1;
+  STATE = 2;
+  OPERATIONAL = 3;
+}
+
+enum SubscriptionMode {
+  TARGET_DEFINED = 0;
+  ON_CHANGE = 1;
+  SAMPLE = 2;
+}

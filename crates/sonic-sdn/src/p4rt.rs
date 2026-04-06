@@ -1,15 +1,20 @@
 //! P4Runtime client for programmable forwarding-plane control.
 //!
 //! Implements connection setup with master arbitration, pipeline
-//! configuration, table entry management, and counter reads.
+//! configuration, table entry management, and counter reads. RPC dispatch
+//! uses generated tonic stubs with conversions between the ergonomic public
+//! Rust types and the proto wire format.
 
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, info, warn};
 
 use sonic_core::{Result, SonicError};
+
+use crate::proto::p4::v1 as pb;
 
 // ---------------------------------------------------------------------------
 // P4Runtime message types
@@ -174,12 +179,152 @@ pub struct CounterEntry {
     pub packet_count: i64,
 }
 
-/// Master arbitration update for role election.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ArbitrationUpdate {
-    device_id: u64,
-    election_id_high: u64,
-    election_id_low: u64,
+// ---------------------------------------------------------------------------
+// Proto <-> public type conversions
+// ---------------------------------------------------------------------------
+
+fn match_field_to_proto(mf: &MatchField) -> pb::FieldMatch {
+    let field_match_type = match mf.match_type {
+        MatchType::Exact => Some(pb::field_match::FieldMatchType::Exact(
+            pb::field_match::Exact { value: mf.value.clone() },
+        )),
+        MatchType::Lpm => {
+            let prefix_len = mf.mask.as_ref().map(|m| {
+                if m.len() >= 4 {
+                    i32::from_be_bytes([m[0], m[1], m[2], m[3]])
+                } else {
+                    0
+                }
+            }).unwrap_or(0);
+            Some(pb::field_match::FieldMatchType::Lpm(
+                pb::field_match::Lpm { value: mf.value.clone(), prefix_len },
+            ))
+        }
+        MatchType::Ternary => Some(pb::field_match::FieldMatchType::Ternary(
+            pb::field_match::Ternary {
+                value: mf.value.clone(),
+                mask: mf.mask.clone().unwrap_or_default(),
+            },
+        )),
+        MatchType::Range => Some(pb::field_match::FieldMatchType::Range(
+            pb::field_match::Range {
+                low: mf.range_low.clone().unwrap_or_default(),
+                high: mf.range_high.clone().unwrap_or_default(),
+            },
+        )),
+        MatchType::Optional => Some(pb::field_match::FieldMatchType::Optional(
+            pb::field_match::Optional { value: mf.value.clone() },
+        )),
+    };
+
+    pb::FieldMatch {
+        field_id: mf.field_id,
+        field_match_type,
+    }
+}
+
+fn match_field_from_proto(fm: &pb::FieldMatch) -> MatchField {
+    match &fm.field_match_type {
+        Some(pb::field_match::FieldMatchType::Exact(e)) => MatchField {
+            field_id: fm.field_id,
+            match_type: MatchType::Exact,
+            value: e.value.clone(),
+            mask: None,
+            range_low: None,
+            range_high: None,
+        },
+        Some(pb::field_match::FieldMatchType::Lpm(l)) => MatchField {
+            field_id: fm.field_id,
+            match_type: MatchType::Lpm,
+            value: l.value.clone(),
+            mask: Some(l.prefix_len.to_be_bytes().to_vec()),
+            range_low: None,
+            range_high: None,
+        },
+        Some(pb::field_match::FieldMatchType::Ternary(t)) => MatchField {
+            field_id: fm.field_id,
+            match_type: MatchType::Ternary,
+            value: t.value.clone(),
+            mask: Some(t.mask.clone()),
+            range_low: None,
+            range_high: None,
+        },
+        Some(pb::field_match::FieldMatchType::Range(r)) => MatchField {
+            field_id: fm.field_id,
+            match_type: MatchType::Range,
+            value: Vec::new(),
+            mask: None,
+            range_low: Some(r.low.clone()),
+            range_high: Some(r.high.clone()),
+        },
+        Some(pb::field_match::FieldMatchType::Optional(o)) => MatchField {
+            field_id: fm.field_id,
+            match_type: MatchType::Optional,
+            value: o.value.clone(),
+            mask: None,
+            range_low: None,
+            range_high: None,
+        },
+        None => MatchField {
+            field_id: fm.field_id,
+            match_type: MatchType::Exact,
+            value: Vec::new(),
+            mask: None,
+            range_low: None,
+            range_high: None,
+        },
+    }
+}
+
+fn table_entry_to_proto(entry: &TableEntry) -> pb::TableEntry {
+    let action = entry.action.as_ref().map(|a| {
+        pb::TableAction {
+            r#type: Some(pb::table_action::Type::Action(pb::Action {
+                action_id: a.action_id,
+                params: a.params.iter().map(|p| pb::action::Param {
+                    param_id: p.param_id,
+                    value: p.value.clone(),
+                }).collect(),
+            })),
+        }
+    });
+
+    pb::TableEntry {
+        table_id: entry.table_id,
+        r#match: entry.match_fields.iter().map(match_field_to_proto).collect(),
+        action,
+        priority: entry.priority,
+        controller_metadata: 0,
+        is_default_action: entry.is_default_action,
+        idle_timeout_ns: entry.idle_timeout_ns,
+        counter_data: None,
+    }
+}
+
+fn table_entry_from_proto(te: &pb::TableEntry) -> TableEntry {
+    let action = te.action.as_ref().and_then(|ta| {
+        match &ta.r#type {
+            Some(pb::table_action::Type::Action(a)) => Some(Action {
+                action_id: a.action_id,
+                params: a.params.iter().map(|p| ActionParam {
+                    param_id: p.param_id,
+                    value: p.value.clone(),
+                }).collect(),
+            }),
+            None => None,
+        }
+    });
+
+    TableEntry {
+        table_id: te.table_id,
+        table_name: String::new(),
+        match_fields: te.r#match.iter().map(match_field_from_proto).collect(),
+        action,
+        priority: te.priority,
+        is_default_action: te.is_default_action,
+        idle_timeout_ns: te.idle_timeout_ns,
+        metadata: Vec::new(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -251,36 +396,18 @@ impl P4RuntimeClient {
         })
     }
 
-    /// Verifies channel readiness and sends a JSON-encoded gRPC request.
-    ///
-    /// In a full deployment with generated proto stubs, this would use the
-    /// typed P4Runtime client. The channel establishment and readiness check
-    /// are real; RPC dispatch requires proto codegen.
-    async fn grpc_call(
-        &self,
-        method: &str,
-        request: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let channel = self.channel()?;
+    /// Builds a generated P4Runtime client from the current channel.
+    fn grpc_client(&self) -> Result<pb::p4_runtime_client::P4RuntimeClient<Channel>> {
+        let channel = self.channel()?.clone();
+        Ok(pb::p4_runtime_client::P4RuntimeClient::new(channel))
+    }
 
-        let mut client = tonic::client::Grpc::new(channel.clone());
-        client.ready().await.map_err(|e| {
-            SonicError::Grpc(format!("channel not ready: {e}"))
-        })?;
-
-        debug!(
-            method,
-            device_id = self.device_id,
-            "P4Runtime RPC (channel ready, requires proto stubs for dispatch)"
-        );
-
-        let _ = request;
-
-        Err(SonicError::Grpc(format!(
-            "P4Runtime method {method} requires generated proto stubs; \
-             channel to {} is established and ready",
-            self.endpoint
-        )))
+    /// Returns the election ID as a proto Uint128.
+    fn election_id_proto(&self) -> pb::Uint128 {
+        pb::Uint128 {
+            high: self.election_id.0,
+            low: self.election_id.1,
+        }
     }
 
     /// Establishes a connection and performs master arbitration.
@@ -328,7 +455,8 @@ impl P4RuntimeClient {
         Ok(())
     }
 
-    /// Performs the master arbitration handshake.
+    /// Performs the master arbitration handshake via the StreamChannel
+    /// bidirectional streaming RPC.
     async fn master_arbitration(&mut self) -> Result<()> {
         info!(
             device_id = self.device_id,
@@ -336,34 +464,71 @@ impl P4RuntimeClient {
             "performing master arbitration"
         );
 
-        let arb = ArbitrationUpdate {
-            device_id: self.device_id,
-            election_id_high: self.election_id.0,
-            election_id_low: self.election_id.1,
+        let arb_request = pb::StreamMessageRequest {
+            update: Some(pb::stream_message_request::Update::Arbitration(
+                pb::MasterArbitrationUpdate {
+                    device_id: self.device_id,
+                    election_id: Some(self.election_id_proto()),
+                    status: None,
+                },
+            )),
         };
 
-        match self
-            .grpc_call(
-                "/p4.v1.P4Runtime/StreamChannel",
-                serde_json::to_value(&arb).unwrap_or_default(),
-            )
-            .await
-        {
-            Ok(resp) => {
-                let status_code = resp["status"]["code"].as_i64().unwrap_or(-1);
-                if status_code == 0 {
-                    self.is_master = true;
-                    info!("master arbitration succeeded");
-                } else {
-                    self.is_master = false;
-                    warn!(status_code, "not elected as master");
+        let mut client = self.grpc_client()?;
+
+        // Send a single arbitration request through the bidirectional stream.
+        let (req_tx, req_rx) = mpsc::channel(1);
+        if req_tx.send(arb_request).await.is_err() {
+            return Err(SonicError::Grpc(
+                "failed to send arbitration request".to_owned(),
+            ));
+        }
+        drop(req_tx);
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(req_rx);
+        let result = client.stream_channel(stream).await;
+
+        match result {
+            Ok(response) => {
+                let mut resp_stream = response.into_inner();
+                match resp_stream.message().await {
+                    Ok(Some(msg)) => {
+                        if let Some(pb::stream_message_response::Update::Arbitration(arb)) =
+                            msg.update
+                        {
+                            let status_code = arb
+                                .status
+                                .as_ref()
+                                .map(|s| s.code)
+                                .unwrap_or(0);
+
+                            if status_code == 0 {
+                                self.is_master = true;
+                                info!("master arbitration succeeded");
+                            } else {
+                                self.is_master = false;
+                                warn!(status_code, "not elected as master");
+                            }
+                        } else {
+                            // Response received but no arbitration update; treat as success.
+                            self.is_master = true;
+                            debug!("arbitration response had no arbitration update, assuming master");
+                        }
+                    }
+                    Ok(None) => {
+                        // Empty stream; some implementations close immediately on success.
+                        self.is_master = true;
+                        debug!("arbitration stream closed immediately, assuming master");
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "arbitration stream error");
+                        self.is_master = false;
+                    }
                 }
             }
-            Err(_) => {
-                // Channel is ready but proto stubs needed for actual arbitration.
-                // Mark as master for testing purposes when proto stubs are absent.
-                self.is_master = true;
-                debug!("master arbitration skipped (proto stubs required); assuming master for development");
+            Err(e) => {
+                warn!(error = %e, "StreamChannel RPC failed during arbitration");
+                self.is_master = false;
             }
         }
 
@@ -389,24 +554,35 @@ impl P4RuntimeClient {
             "setting forwarding pipeline"
         );
 
-        let request = serde_json::json!({
-            "device_id": self.device_id,
-            "election_id": {
-                "high": self.election_id.0,
-                "low": self.election_id.1,
-            },
-            "action": "VERIFY_AND_COMMIT",
-            "config": {
-                "p4info_size": p4info.len(),
-                "device_config_size": device_config.len(),
-            },
-        });
+        // Deserialize the P4Info protobuf bytes into the generated type.
+        let p4info_msg: Option<crate::proto::p4::config::v1::P4Info> =
+            if p4info.is_empty() {
+                None
+            } else {
+                Some(prost::Message::decode(p4info).map_err(|e| {
+                    SonicError::Grpc(format!("failed to decode P4Info: {e}"))
+                })?)
+            };
 
-        self.grpc_call(
-            "/p4.v1.P4Runtime/SetForwardingPipelineConfig",
-            request,
-        )
-        .await?;
+        let request = pb::SetForwardingPipelineConfigRequest {
+            device_id: self.device_id,
+            election_id: Some(self.election_id_proto()),
+            action: pb::set_forwarding_pipeline_config_request::Action::VerifyAndCommit
+                as i32,
+            config: Some(pb::ForwardingPipelineConfig {
+                p4info: p4info_msg,
+                p4_device_config: device_config.to_vec(),
+                cookie: Vec::new(),
+            }),
+        };
+
+        let mut client = self.grpc_client()?;
+        client
+            .set_forwarding_pipeline_config(request)
+            .await
+            .map_err(|e| {
+                SonicError::Grpc(format!("SetForwardingPipelineConfig failed: {e}"))
+            })?;
 
         info!("forwarding pipeline set successfully");
         Ok(())
@@ -447,15 +623,23 @@ impl P4RuntimeClient {
             "writing table entry"
         );
 
-        let request = serde_json::json!({
-            "device_id": self.device_id,
-            "updates": [{
-                "type": "INSERT",
-                "entity": { "table_entry": entry },
-            }],
-        });
+        let proto_entry = table_entry_to_proto(&entry);
 
-        self.grpc_call("/p4.v1.P4Runtime/Write", request).await?;
+        let request = pb::WriteRequest {
+            device_id: self.device_id,
+            election_id: Some(self.election_id_proto()),
+            updates: vec![pb::Update {
+                r#type: pb::update::Type::Insert as i32,
+                entity: Some(pb::Entity {
+                    entity: Some(pb::entity::Entity::TableEntry(proto_entry)),
+                }),
+            }],
+        };
+
+        let mut client = self.grpc_client()?;
+        client.write(request).await.map_err(|e| {
+            SonicError::Grpc(format!("P4Runtime Write failed: {e}"))
+        })?;
 
         debug!(table_id, "table entry written");
         Ok(())
@@ -468,25 +652,40 @@ impl P4RuntimeClient {
     ) -> Result<Vec<TableEntry>> {
         debug!(table_id, "reading table entries");
 
-        let request = serde_json::json!({
-            "device_id": self.device_id,
-            "entities": [{ "table_entry": { "table_id": table_id } }],
-        });
+        let request = pb::ReadRequest {
+            device_id: self.device_id,
+            entities: vec![pb::Entity {
+                entity: Some(pb::entity::Entity::TableEntry(pb::TableEntry {
+                    table_id,
+                    r#match: Vec::new(),
+                    action: None,
+                    priority: 0,
+                    controller_metadata: 0,
+                    is_default_action: false,
+                    idle_timeout_ns: 0,
+                    counter_data: None,
+                })),
+            }],
+        };
 
-        let resp = self
-            .grpc_call("/p4.v1.P4Runtime/Read", request)
-            .await?;
+        let mut client = self.grpc_client()?;
+        let response = client.read(request).await.map_err(|e| {
+            SonicError::Grpc(format!("P4Runtime Read failed: {e}"))
+        })?;
 
-        let entries: Vec<TableEntry> = resp["entities"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|entity| {
-                        serde_json::from_value(entity["table_entry"].clone()).ok()
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        // Read is a server-streaming RPC.
+        let mut stream = response.into_inner();
+        let mut entries = Vec::new();
+
+        while let Some(msg) = stream.message().await.map_err(|e| {
+            SonicError::Grpc(format!("read stream error: {e}"))
+        })? {
+            for entity in &msg.entities {
+                if let Some(pb::entity::Entity::TableEntry(te)) = &entity.entity {
+                    entries.push(table_entry_from_proto(te));
+                }
+            }
+        }
 
         debug!(table_id, count = entries.len(), "read table entries");
         Ok(entries)
@@ -499,34 +698,40 @@ impl P4RuntimeClient {
     ) -> Result<Vec<CounterEntry>> {
         debug!(counter_id, "reading counters");
 
-        let request = serde_json::json!({
-            "device_id": self.device_id,
-            "entities": [{ "counter_entry": { "counter_id": counter_id } }],
-        });
+        let request = pb::ReadRequest {
+            device_id: self.device_id,
+            entities: vec![pb::Entity {
+                entity: Some(pb::entity::Entity::CounterEntry(pb::CounterEntry {
+                    counter_id,
+                    index: None,
+                    data: None,
+                })),
+            }],
+        };
 
-        let resp = self
-            .grpc_call("/p4.v1.P4Runtime/Read", request)
-            .await?;
+        let mut client = self.grpc_client()?;
+        let response = client.read(request).await.map_err(|e| {
+            SonicError::Grpc(format!("P4Runtime Read (counters) failed: {e}"))
+        })?;
 
-        let counters: Vec<CounterEntry> = resp["entities"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|entity| {
-                        let ce = &entity["counter_entry"];
-                        Some(CounterEntry {
-                            counter_id: ce["counter_id"].as_u64()? as u32,
-                            counter_name: String::new(),
-                            index: ce["index"]["index"].as_i64().unwrap_or(0),
-                            byte_count: ce["data"]["byte_count"].as_i64().unwrap_or(0),
-                            packet_count: ce["data"]["packet_count"]
-                                .as_i64()
-                                .unwrap_or(0),
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut stream = response.into_inner();
+        let mut counters = Vec::new();
+
+        while let Some(msg) = stream.message().await.map_err(|e| {
+            SonicError::Grpc(format!("counter read stream error: {e}"))
+        })? {
+            for entity in &msg.entities {
+                if let Some(pb::entity::Entity::CounterEntry(ce)) = &entity.entity {
+                    counters.push(CounterEntry {
+                        counter_id: ce.counter_id,
+                        counter_name: String::new(),
+                        index: ce.index.map(|i| i.index).unwrap_or(0),
+                        byte_count: ce.data.map(|d| d.byte_count).unwrap_or(0),
+                        packet_count: ce.data.map(|d| d.packet_count).unwrap_or(0),
+                    });
+                }
+            }
+        }
 
         debug!(counter_id, count = counters.len(), "read counter entries");
         Ok(counters)
@@ -640,5 +845,49 @@ mod tests {
         let deserialized: TableEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.table_id, 1);
         assert_eq!(deserialized.match_fields.len(), 1);
+    }
+
+    #[test]
+    fn table_entry_proto_roundtrip() {
+        let entry = TableEntry::new(1, "test")
+            .with_exact_match(1, vec![10, 0, 0, 1])
+            .with_lpm_match(2, vec![192, 168, 0, 0], 16)
+            .with_ternary_match(3, vec![0xFF], vec![0xFF])
+            .with_action(Action {
+                action_id: 5,
+                params: vec![ActionParam { param_id: 1, value: vec![42] }],
+            })
+            .with_priority(100);
+
+        let proto = table_entry_to_proto(&entry);
+        assert_eq!(proto.table_id, 1);
+        assert_eq!(proto.r#match.len(), 3);
+        assert_eq!(proto.priority, 100);
+
+        let back = table_entry_from_proto(&proto);
+        assert_eq!(back.table_id, 1);
+        assert_eq!(back.match_fields.len(), 3);
+        assert_eq!(back.match_fields[0].match_type, MatchType::Exact);
+        assert_eq!(back.match_fields[1].match_type, MatchType::Lpm);
+        assert_eq!(back.match_fields[2].match_type, MatchType::Ternary);
+        assert_eq!(back.action.as_ref().unwrap().action_id, 5);
+        assert_eq!(back.priority, 100);
+    }
+
+    #[test]
+    fn match_field_exact_roundtrip() {
+        let mf = MatchField {
+            field_id: 1,
+            match_type: MatchType::Exact,
+            value: vec![10, 0, 0, 1],
+            mask: None,
+            range_low: None,
+            range_high: None,
+        };
+        let proto = match_field_to_proto(&mf);
+        let back = match_field_from_proto(&proto);
+        assert_eq!(back.field_id, 1);
+        assert_eq!(back.match_type, MatchType::Exact);
+        assert_eq!(back.value, vec![10, 0, 0, 1]);
     }
 }

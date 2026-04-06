@@ -3142,6 +3142,7 @@ dependencies = [
  "sonic-core",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "toml",
  "tonic",
  "tonic-build",

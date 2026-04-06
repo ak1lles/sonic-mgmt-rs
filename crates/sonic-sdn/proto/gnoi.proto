@@ -1,0 +1,101 @@
+syntax = "proto3";
+package gnoi.system;
+
+import "gnoi_types.proto";
+
+service System {
+  rpc Reboot(RebootRequest) returns (RebootResponse);
+  rpc Time(TimeRequest) returns (TimeResponse);
+  rpc Ping(PingRequest) returns (stream PingResponse);
+  rpc Traceroute(TracerouteRequest) returns (stream TracerouteResponse);
+  rpc RebootStatus(RebootStatusRequest) returns (RebootStatusResponse);
+}
+
+message RebootRequest {
+  RebootMethod method = 1;
+  uint64 delay = 2;
+  string message = 3;
+  repeated string subcomponents = 4;
+  bool force = 5;
+}
+
+message RebootResponse {}
+
+enum RebootMethod {
+  UNKNOWN = 0;
+  COLD = 1;
+  POWERDOWN = 2;
+  HALT = 3;
+  WARM = 4;
+  NSF = 5;
+  POWERUP = 7;
+}
+
+message RebootStatusRequest {}
+
+message RebootStatusResponse {
+  bool active = 1;
+  uint64 wait = 2;
+  string when = 3;
+  string reason = 4;
+  uint32 count = 5;
+}
+
+message TimeRequest {}
+
+message TimeResponse {
+  uint64 time = 1;
+}
+
+message PingRequest {
+  string destination = 1;
+  string source = 2;
+  int32 count = 3;
+  int64 interval = 4;
+  int64 wait = 5;
+  int32 size = 6;
+  bool do_not_fragment = 7;
+  bool do_not_resolve = 8;
+  string l3protocol = 9;
+}
+
+message PingResponse {
+  string source = 1;
+  int32 time = 2;
+  int32 sent = 3;
+  int32 received = 4;
+  int64 min_time = 5;
+  int64 avg_time = 6;
+  int64 max_time = 7;
+  int64 std_dev = 8;
+  int32 bytes = 10;
+  int32 sequence = 11;
+  int32 ttl = 12;
+}
+
+message TracerouteRequest {
+  string destination = 1;
+  string source = 2;
+  int32 initial_ttl = 3;
+  int32 max_ttl = 4;
+  int64 wait = 5;
+  bool do_not_fragment = 6;
+  bool do_not_resolve = 7;
+  string l3protocol = 8;
+  bool do_not_lookup = 9;
+}
+
+message TracerouteResponse {
+  string destination_name = 1;
+  string destination_address = 2;
+  int32 hops = 3;
+  int32 packet_size = 4;
+  Hop hop = 5;
+}
+
+message Hop {
+  int32 index = 1;
+  string address = 2;
+  string name = 3;
+  int64 rtt = 4;
+}

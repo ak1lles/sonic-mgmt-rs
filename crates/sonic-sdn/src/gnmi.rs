@@ -1,8 +1,9 @@
 //! gNMI (gRPC Network Management Interface) client.
 //!
 //! Implements Get, Set, and Subscribe RPCs for querying and configuring device
-//! state via the OpenConfig gNMI protocol.  The protobuf message types are
-//! modeled as plain Rust structs rather than generated from `.proto` files.
+//! state via the OpenConfig gNMI protocol. Protobuf serialization is handled by
+//! the generated tonic/prost stubs; the public API uses ergonomic Rust types
+//! with conversions to and from the proto layer.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -13,6 +14,8 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity
 use tracing::{debug, info, trace, warn};
 
 use sonic_core::{Result, SonicError};
+
+use crate::proto::gnmi as pb;
 
 // ---------------------------------------------------------------------------
 // gNMI Path types
@@ -119,7 +122,86 @@ impl GnmiPath {
 }
 
 // ---------------------------------------------------------------------------
-// gNMI protobuf message types (manually modeled)
+// Proto <-> public type conversions
+// ---------------------------------------------------------------------------
+
+impl From<&GnmiPath> for pb::Path {
+    fn from(path: &GnmiPath) -> Self {
+        pb::Path {
+            elem: path.elements.iter().map(|e| pb::PathElem {
+                name: e.name.clone(),
+                key: e.key.clone(),
+            }).collect(),
+            origin: path.origin.clone(),
+            target: String::new(),
+        }
+    }
+}
+
+impl From<&pb::Path> for GnmiPath {
+    fn from(path: &pb::Path) -> Self {
+        GnmiPath {
+            elements: path.elem.iter().map(|e| PathElement {
+                name: e.name.clone(),
+                key: e.key.clone(),
+            }).collect(),
+            origin: path.origin.clone(),
+        }
+    }
+}
+
+/// Converts a proto TypedValue into a serde_json::Value for the public API.
+fn typed_value_to_json(tv: &pb::TypedValue) -> serde_json::Value {
+    match &tv.value {
+        Some(pb::typed_value::Value::StringVal(s)) => serde_json::Value::String(s.clone()),
+        Some(pb::typed_value::Value::IntVal(n)) => serde_json::json!(*n),
+        Some(pb::typed_value::Value::UintVal(n)) => serde_json::json!(*n),
+        Some(pb::typed_value::Value::BoolVal(b)) => serde_json::Value::Bool(*b),
+        Some(pb::typed_value::Value::FloatVal(f)) => serde_json::json!(*f),
+        Some(pb::typed_value::Value::DoubleVal(f)) => serde_json::json!(*f),
+        Some(pb::typed_value::Value::JsonIetfVal(bytes))
+        | Some(pb::typed_value::Value::JsonVal(bytes)) => {
+            serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null)
+        }
+        Some(pb::typed_value::Value::BytesVal(bytes)) => {
+            serde_json::json!(bytes)
+        }
+        _ => serde_json::Value::Null,
+    }
+}
+
+/// Converts a serde_json::Value into a proto TypedValue, preferring JSON_IETF
+/// encoding for objects/arrays and direct typed encoding for scalars.
+fn json_to_typed_value(val: &serde_json::Value) -> pb::TypedValue {
+    let value = match val {
+        serde_json::Value::String(s) => {
+            Some(pb::typed_value::Value::StringVal(s.clone()))
+        }
+        serde_json::Value::Bool(b) => {
+            Some(pb::typed_value::Value::BoolVal(*b))
+        }
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Some(pb::typed_value::Value::IntVal(i))
+            } else if let Some(u) = n.as_u64() {
+                Some(pb::typed_value::Value::UintVal(u))
+            } else if let Some(f) = n.as_f64() {
+                Some(pb::typed_value::Value::DoubleVal(f))
+            } else {
+                None
+            }
+        }
+        _ => {
+            // Objects, arrays, null -- encode as JSON_IETF bytes.
+            let bytes = serde_json::to_vec(val).unwrap_or_default();
+            Some(pb::typed_value::Value::JsonIetfVal(bytes))
+        }
+    };
+    pb::TypedValue { value }
+}
+
+// ---------------------------------------------------------------------------
+// gNMI public message types
 // ---------------------------------------------------------------------------
 
 /// Subscription mode for gNMI Subscribe RPC.
@@ -231,6 +313,51 @@ impl Default for Encoding {
     fn default() -> Self {
         Self::JsonIetf
     }
+}
+
+impl Encoding {
+    fn to_proto(self) -> i32 {
+        match self {
+            Self::Json => pb::Encoding::Json as i32,
+            Self::JsonIetf => pb::Encoding::JsonIetf as i32,
+            Self::Bytes => pb::Encoding::Bytes as i32,
+            Self::Proto => pb::Encoding::Proto as i32,
+            Self::Ascii => pb::Encoding::Ascii as i32,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Proto response -> public type conversions
+// ---------------------------------------------------------------------------
+
+fn notification_from_proto(n: &pb::Notification) -> Notification {
+    Notification {
+        timestamp: n.timestamp,
+        updates: n.update.iter().map(|u| {
+            let path = u.path.as_ref()
+                .map(GnmiPath::from)
+                .unwrap_or_else(|| GnmiPath { elements: vec![], origin: String::new() });
+            let value = u.val.as_ref()
+                .map(typed_value_to_json)
+                .unwrap_or(serde_json::Value::Null);
+            Update { path, value }
+        }).collect(),
+        deletes: n.delete.iter().map(GnmiPath::from).collect(),
+    }
+}
+
+fn update_result_from_proto(r: &pb::UpdateResult) -> UpdateResult {
+    let path = r.path.as_ref()
+        .map(GnmiPath::from)
+        .unwrap_or_else(|| GnmiPath { elements: vec![], origin: String::new() });
+    let op = match pb::Operation::try_from(r.op) {
+        Ok(pb::Operation::Delete) => UpdateOp::Delete,
+        Ok(pb::Operation::Replace) => UpdateOp::Replace,
+        _ => UpdateOp::Update,
+    };
+    let message = if r.message.is_empty() { None } else { Some(r.message.clone()) };
+    UpdateResult { path, op, message }
 }
 
 // ---------------------------------------------------------------------------
@@ -387,56 +514,18 @@ impl GnmiClient {
         })
     }
 
-    /// Sends a JSON-encoded gRPC request over the channel and returns the
-    /// raw response bytes.
-    ///
-    /// This uses an HTTP/2 POST to the gRPC method path. The request body is
-    /// JSON-encoded (not protobuf) which works with gNMI targets that support
-    /// JSON encoding, or can be replaced with protobuf serialization when
-    /// generated stubs are available.
-    async fn grpc_json_call(
-        &self,
-        method_path: &str,
-        request_body: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let channel = self.channel()?;
-
-        // Verify the channel is ready.
-        let mut grpc_client = tonic::client::Grpc::new(channel.clone());
-        grpc_client.ready().await.map_err(|e| {
-            SonicError::Grpc(format!("channel not ready: {e}"))
-        })?;
-
-        // In a production implementation with generated proto stubs, this
-        // would use the typed client (e.g., `gnmi::GnmiClient::get()`).
-        // Since we model proto messages as plain Rust structs, we serialize
-        // the request to JSON.  A real deployment would swap this for proper
-        // protobuf serialization via prost.
-        debug!(
-            method = method_path,
-            endpoint = %self.endpoint,
-            "sending gRPC request (JSON-encoded)"
-        );
-
-        // For now, the channel is established and validated. The actual RPC
-        // dispatching would use the generated service client. We return a
-        // placeholder response to allow the calling code to function.
-        //
-        // In a fully integrated build with .proto files, replace this with:
-        //   let response = gnmi_client.get(tonic::Request::new(request)).await?;
-        let _ = request_body;
-        let _ = method_path;
-
-        Err(SonicError::Grpc(format!(
-            "gRPC method {method_path} requires generated proto stubs; \
-             channel to {} is established and ready",
-            self.endpoint
-        )))
+    /// Builds a generated gNMI client from the current channel.
+    fn grpc_client(&self) -> Result<pb::g_nmi_client::GNmiClient<Channel>> {
+        let channel = self.channel()?.clone();
+        Ok(pb::g_nmi_client::GNmiClient::new(channel))
     }
 
     /// Queries device state at the given gNMI path (Get RPC).
     ///
-    /// Returns the response value as a `serde_json::Value`.
+    /// Returns the response value as a `serde_json::Value`. When the response
+    /// contains multiple notifications with multiple updates, they are merged
+    /// into a single JSON object. For a single update the value is returned
+    /// directly.
     pub async fn get(&self, path: &GnmiPath) -> Result<serde_json::Value> {
         debug!(
             path = %path.to_xpath(),
@@ -444,16 +533,33 @@ impl GnmiClient {
             "gNMI Get"
         );
 
-        let request = GetRequest {
-            path: vec![path.clone()],
-            encoding: Encoding::JsonIetf,
+        let request = pb::GetRequest {
+            path: vec![pb::Path::from(path)],
+            encoding: Encoding::JsonIetf.to_proto(),
+            prefix: None,
+            r#type: pb::DataType::All as i32,
         };
 
-        self.grpc_json_call(
-            "/gnmi.gNMI/Get",
-            serde_json::to_value(&request)?,
-        )
-        .await
+        let mut client = self.grpc_client()?;
+        let response = client.get(request).await.map_err(|e| {
+            SonicError::Grpc(format!("gNMI Get failed: {e}"))
+        })?;
+
+        let resp = response.into_inner();
+        let notifications: Vec<Notification> = resp.notification.iter()
+            .map(notification_from_proto)
+            .collect();
+
+        // Flatten all updates into a single JSON result.
+        let mut values: Vec<serde_json::Value> = notifications.iter()
+            .flat_map(|n| n.updates.iter().map(|u| u.value.clone()))
+            .collect();
+
+        match values.len() {
+            0 => Ok(serde_json::Value::Null),
+            1 => Ok(values.remove(0)),
+            _ => Ok(serde_json::Value::Array(values)),
+        }
     }
 
     /// Updates device configuration at the given gNMI path (Set RPC).
@@ -468,23 +574,27 @@ impl GnmiClient {
             "gNMI Set"
         );
 
-        let update = Update {
-            path: path.clone(),
-            value,
+        let proto_update = pb::Update {
+            path: Some(pb::Path::from(path)),
+            val: Some(json_to_typed_value(&value)),
         };
 
-        let request = SetRequest {
-            update: vec![update],
-            replace: Vec::new(),
+        let request = pb::SetRequest {
+            prefix: None,
             delete: Vec::new(),
+            replace: Vec::new(),
+            update: vec![proto_update],
         };
 
-        let resp = self
-            .grpc_json_call("/gnmi.gNMI/Set", serde_json::to_value(&request)?)
-            .await?;
+        let mut client = self.grpc_client()?;
+        let response = client.set(request).await.map_err(|e| {
+            SonicError::Grpc(format!("gNMI Set failed: {e}"))
+        })?;
 
-        serde_json::from_value(resp).map_err(|e| {
-            SonicError::Grpc(format!("failed to parse Set response: {e}"))
+        let resp = response.into_inner();
+        Ok(SetResponse {
+            timestamp: resp.timestamp,
+            results: resp.response.iter().map(update_result_from_proto).collect(),
         })
     }
 
@@ -497,7 +607,7 @@ impl GnmiClient {
         paths: &[GnmiPath],
         mode: SubscriptionMode,
     ) -> Result<mpsc::Receiver<SubscribeResponse>> {
-        let channel = self.channel()?;
+        let channel = self.channel()?.clone();
 
         info!(
             paths = paths.len(),
@@ -506,62 +616,106 @@ impl GnmiClient {
             "gNMI Subscribe"
         );
 
-        // Verify the channel is ready.
-        let mut grpc_client = tonic::client::Grpc::new(channel.clone());
-        grpc_client.ready().await.map_err(|e| {
-            SonicError::Grpc(format!("channel not ready for subscribe: {e}"))
-        })?;
-
         let (tx, rx) = mpsc::channel(256);
 
-        let subscriptions: Vec<Subscription> = paths
+        // Build the proto SubscriptionList mode. Our public SubscriptionMode
+        // maps to the proto SubscriptionList.mode for ONCE/STREAM/POLL, while
+        // individual Subscription.mode uses SAMPLE by default.
+        let list_mode = match mode {
+            SubscriptionMode::Once => pb::SubscriptionMode::OnChange as i32,
+            SubscriptionMode::Stream => pb::SubscriptionMode::Sample as i32,
+            SubscriptionMode::Poll => pb::SubscriptionMode::TargetDefined as i32,
+        };
+
+        let subscriptions: Vec<pb::Subscription> = paths
             .iter()
-            .map(|p| Subscription {
-                path: p.clone(),
-                sample_interval_ns: 10_000_000_000, // 10 seconds default
+            .map(|p| pb::Subscription {
+                path: Some(pb::Path::from(p)),
+                mode: pb::SubscriptionMode::Sample as i32,
+                sample_interval: 10_000_000_000, // 10 seconds default
             })
             .collect();
 
-        let _request = SubscribeRequest {
-            subscriptions,
-            mode,
-            encoding: Encoding::JsonIetf,
+        let subscribe_request = pb::SubscribeRequest {
+            request: Some(pb::subscribe_request::Request::Subscribe(
+                pb::SubscriptionList {
+                    prefix: None,
+                    subscription: subscriptions,
+                    mode: list_mode,
+                    encoding: Encoding::JsonIetf.to_proto(),
+                },
+            )),
         };
 
         let endpoint = self.endpoint.clone();
-        let channel = channel.clone();
+        let is_once = mode == SubscriptionMode::Once;
 
-        // Spawn a background task that manages the subscription stream.
         tokio::spawn(async move {
             debug!(endpoint = %endpoint, "subscription stream task started");
 
-            // Verify the channel is usable.
-            let mut client = tonic::client::Grpc::new(channel);
-            if let Err(e) = client.ready().await {
-                warn!(error = %e, "subscribe channel not ready");
+            let mut client = pb::g_nmi_client::GNmiClient::new(channel);
+
+            // The Subscribe RPC is a bidirectional stream. We send a single
+            // request and then read responses.
+            let (req_tx, req_rx) = mpsc::channel(1);
+            if req_tx.send(subscribe_request).await.is_err() {
+                warn!("failed to send subscribe request");
                 return;
             }
+            drop(req_tx); // Close the request stream after sending.
 
-            // Send initial sync response.
-            let sync = SubscribeResponse {
-                update: None,
-                sync_response: true,
-            };
-            if tx.send(sync).await.is_err() {
-                trace!("subscriber dropped, ending stream");
-                return;
+            let stream = tokio_stream::wrappers::ReceiverStream::new(req_rx);
+            let result = client.subscribe(stream).await;
+
+            match result {
+                Ok(response) => {
+                    let mut stream = response.into_inner();
+                    loop {
+                        match stream.message().await {
+                            Ok(Some(msg)) => {
+                                let sub_resp = match msg.response {
+                                    Some(pb::subscribe_response::Response::Update(notif)) => {
+                                        SubscribeResponse {
+                                            update: Some(notification_from_proto(&notif)),
+                                            sync_response: false,
+                                        }
+                                    }
+                                    Some(pb::subscribe_response::Response::SyncResponse(sync)) => {
+                                        SubscribeResponse {
+                                            update: None,
+                                            sync_response: sync,
+                                        }
+                                    }
+                                    None => continue,
+                                };
+
+                                let is_sync = sub_resp.sync_response;
+                                if tx.send(sub_resp).await.is_err() {
+                                    trace!("subscriber dropped, ending stream");
+                                    return;
+                                }
+
+                                // For once-mode, close after sync response.
+                                if is_once && is_sync {
+                                    debug!("once-mode subscription complete");
+                                    return;
+                                }
+                            }
+                            Ok(None) => {
+                                debug!("subscribe stream closed by server");
+                                return;
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "subscribe stream error");
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "subscribe RPC failed");
+                }
             }
-
-            // For SubscriptionMode::Once, close after sync.
-            if mode == SubscriptionMode::Once {
-                debug!("once-mode subscription complete");
-                return;
-            }
-
-            // For Stream/Poll modes, the task continues until the receiver is
-            // dropped.  In a full implementation with generated stubs, this
-            // reads from the bidirectional gRPC stream.
-            debug!("subscription stream active, awaiting updates from generated stub");
         });
 
         Ok(rx)
@@ -670,5 +824,78 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("hostname"));
         assert!(json.contains("switch-1"));
+    }
+
+    #[test]
+    fn proto_path_roundtrip() {
+        let path = GnmiPath {
+            elements: vec![
+                PathElement::new("interfaces"),
+                PathElement::with_key("interface", "name", "Ethernet0"),
+            ],
+            origin: "openconfig".to_owned(),
+        };
+
+        let proto: pb::Path = (&path).into();
+        assert_eq!(proto.elem.len(), 2);
+        assert_eq!(proto.elem[0].name, "interfaces");
+        assert_eq!(proto.elem[1].key["name"], "Ethernet0");
+        assert_eq!(proto.origin, "openconfig");
+
+        let back = GnmiPath::from(&proto);
+        assert_eq!(back.elements.len(), 2);
+        assert_eq!(back.origin, "openconfig");
+    }
+
+    #[test]
+    fn json_to_typed_value_string() {
+        let val = serde_json::json!("hello");
+        let tv = json_to_typed_value(&val);
+        match tv.value {
+            Some(pb::typed_value::Value::StringVal(s)) => assert_eq!(s, "hello"),
+            other => panic!("expected StringVal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_to_typed_value_int() {
+        let val = serde_json::json!(42);
+        let tv = json_to_typed_value(&val);
+        match tv.value {
+            Some(pb::typed_value::Value::IntVal(n)) => assert_eq!(n, 42),
+            other => panic!("expected IntVal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn json_to_typed_value_object() {
+        let val = serde_json::json!({"key": "value"});
+        let tv = json_to_typed_value(&val);
+        match tv.value {
+            Some(pb::typed_value::Value::JsonIetfVal(bytes)) => {
+                let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(parsed["key"], "value");
+            }
+            other => panic!("expected JsonIetfVal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_value_to_json_string() {
+        let tv = pb::TypedValue {
+            value: Some(pb::typed_value::Value::StringVal("test".to_owned())),
+        };
+        assert_eq!(typed_value_to_json(&tv), serde_json::json!("test"));
+    }
+
+    #[test]
+    fn typed_value_to_json_ietf() {
+        let obj = serde_json::json!({"enabled": true});
+        let bytes = serde_json::to_vec(&obj).unwrap();
+        let tv = pb::TypedValue {
+            value: Some(pb::typed_value::Value::JsonIetfVal(bytes)),
+        };
+        let result = typed_value_to_json(&tv);
+        assert_eq!(result["enabled"], true);
     }
 }

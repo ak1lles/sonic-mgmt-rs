@@ -18,6 +18,7 @@ async-trait = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
 prost-types = { workspace = true }
+tokio-stream = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 http = { workspace = true }

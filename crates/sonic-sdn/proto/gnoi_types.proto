@@ -1,0 +1,21 @@
+syntax = "proto3";
+package gnoi.types;
+
+message HashType {
+  enum HashMethod {
+    UNSPECIFIED = 0;
+    SHA256 = 1;
+    SHA512 = 2;
+    MD5 = 3;
+  }
+  HashMethod method = 1;
+  bytes hash = 2;
+}
+
+message Credentials {
+  string username = 1;
+  oneof password {
+    string cleartext = 2;
+    HashType hashed = 3;
+  }
+}
