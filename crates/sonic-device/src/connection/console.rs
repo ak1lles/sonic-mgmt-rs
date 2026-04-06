@@ -54,6 +54,10 @@ pub struct ConsoleConnection {
 }
 
 impl ConsoleConnection {
+    /// Creates a new, disconnected console connection descriptor.
+    ///
+    /// Defaults to a 60 s connect timeout, 120 s command timeout, and a
+    /// prompt regex matching lines ending in `$`, `#`, or `>`.
     pub fn new(
         console_info: ConsoleInfo,
         device_name: impl Into<String>,
@@ -70,16 +74,19 @@ impl ConsoleConnection {
         }
     }
 
+    /// Overrides the shell prompt regex used to detect command completion.
     pub fn with_prompt(mut self, pattern: &str) -> Result<Self> {
         self.prompt = Regex::new(pattern)?;
         Ok(self)
     }
 
+    /// Overrides the TCP connect and conserver negotiation timeout (default 60 s).
     pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect_timeout = timeout;
         self
     }
 
+    /// Overrides the per-command timeout (default 120 s).
     pub fn with_command_timeout(mut self, timeout: Duration) -> Self {
         self.command_timeout = timeout;
         self

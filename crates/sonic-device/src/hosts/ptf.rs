@@ -24,6 +24,7 @@ pub struct PtfHost {
 }
 
 impl PtfHost {
+    /// Creates a new PTF host driver.
     pub fn new(info: DeviceInfo) -> Self {
         Self {
             info,

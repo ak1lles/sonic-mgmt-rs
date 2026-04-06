@@ -1,3 +1,10 @@
+//! Shared domain model for the sonic-mgmt workspace.
+//!
+//! Every crate in the workspace depends on these types. They represent devices,
+//! connections, topologies, test results, network primitives, and testbed
+//! lifecycle states. All types derive [`Serialize`] and [`Deserialize`] for
+//! configuration file round-tripping.
+
 use chrono::{DateTime, Utc};
 use ipnetwork::{Ipv4Network, Ipv6Network};
 use serde::{Deserialize, Serialize};
@@ -10,17 +17,30 @@ use uuid::Uuid;
 // Device types
 // ---------------------------------------------------------------------------
 
+/// Classification of network devices managed by the test framework.
+///
+/// Each variant maps to a host implementation in `sonic-device` that knows
+/// how to connect, configure, and query that device type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceType {
+    /// SONiC network operating system switch (device under test).
     Sonic,
+    /// Arista EOS switch, typically used as a BGP neighbor VM.
     Eos,
+    /// Cisco IOS/NX-OS switch, used as a BGP neighbor VM.
     Cisco,
+    /// Fanout switch that breaks out physical ports to the DUT.
     Fanout,
+    /// Packet Test Framework container running scapy-based tests.
     Ptf,
+    /// Kubernetes master node for container-based test orchestration.
     K8sMaster,
+    /// Aruba AOS switch.
     Aos,
+    /// Cumulus Linux switch.
     Cumulus,
+    /// Open Network Install Environment, used during image provisioning.
     Onie,
 }
 
@@ -40,13 +60,22 @@ impl fmt::Display for DeviceType {
     }
 }
 
+/// Transport protocol used to reach a device.
+///
+/// The connection layer in `sonic-device` dispatches on this enum to create
+/// the appropriate session type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionType {
+    /// Secure Shell (port 22 by default).
     Ssh,
+    /// Telnet, used for legacy console servers.
     Telnet,
+    /// Serial console via a conserver aggregation server.
     Console,
+    /// gRPC, used for gNMI/gNOI/P4Runtime management.
     Grpc,
+    /// Local shell execution, used when running on the device itself.
     Local,
 }
 
@@ -62,17 +91,30 @@ impl fmt::Display for ConnectionType {
     }
 }
 
+/// ASIC vendor platform running on a switch.
+///
+/// Determines which hardware-specific behaviors apply (e.g., counter polling
+/// intervals, supported features, warm reboot capability).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Platform {
+    /// Broadcom switch ASICs.
     Broadcom,
+    /// Mellanox/NVIDIA Spectrum switch ASICs.
     Mellanox,
+    /// Intel Barefoot Tofino programmable ASICs.
     Barefoot,
+    /// Marvell Prestera/Aldrin switch ASICs.
     Marvell,
+    /// Nokia custom silicon.
     Nokia,
+    /// Cisco Silicon One ASICs.
     Cisco,
+    /// Centec switch ASICs.
     Centec,
+    /// Software dataplane for virtual/KVM-based switches.
     Virtual,
+    /// Platform has not been identified yet.
     Unknown,
 }
 
@@ -97,22 +139,41 @@ impl fmt::Display for Platform {
 // Topology
 // ---------------------------------------------------------------------------
 
+/// Testbed topology layout.
+///
+/// Each variant defines a specific arrangement of VMs, ports, and links
+/// that models a SONiC deployment tier. Use [`TopologyType::vm_count`] to
+/// query how many neighbor VMs a topology requires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TopologyType {
+    /// Leaf (ToR) topology with 4 upstream VMs.
     T0,
+    /// Leaf topology scaled to 64 ports.
     T064,
+    /// Leaf topology scaled to 116 ports.
     T0116,
+    /// Spine topology with 32 downstream VMs.
     T1,
+    /// Spine topology scaled to 64 ports.
     T164,
+    /// Spine topology with LAG bundles to downstream VMs.
     T1Lag,
+    /// Super-spine topology with 64 VMs.
     T2,
+    /// Dual ToR (active-standby mux cable) topology with 4 VMs.
     Dualtor,
+    /// Management ToR topology with 4 VMs.
     MgmtTor,
+    /// M0 VLAN topology with 4 VMs.
     M0Vlan,
+    /// PTF-only topology with 32 ports, no VMs.
     Ptf32,
+    /// PTF-only topology with 64 ports, no VMs.
     Ptf64,
+    /// PTF-only topology with default port count, no VMs.
     Ptf,
+    /// Wildcard that matches any topology.
     Any,
 }
 
@@ -138,6 +199,7 @@ impl fmt::Display for TopologyType {
 }
 
 impl TopologyType {
+    /// Returns the number of neighbor VMs required by this topology.
     pub fn vm_count(&self) -> usize {
         match self {
             Self::T0 => 4,
@@ -156,22 +218,30 @@ impl TopologyType {
         }
     }
 
+    /// Returns `true` if this topology needs at least one neighbor VM.
     pub fn requires_vms(&self) -> bool {
         self.vm_count() > 0
     }
 
+    /// Returns `true` if this topology uses only a PTF container with no VMs.
     pub fn is_ptf_only(&self) -> bool {
         matches!(self, Self::Ptf | Self::Ptf32 | Self::Ptf64)
     }
 }
 
+/// Virtual machine image flavor used for neighbor simulation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VmType {
+    /// Arista vEOS running as a KVM virtual machine.
     Veos,
+    /// Arista cEOS running as a Docker container.
     Ceos,
+    /// SONiC virtual switch running as a KVM VM.
     Vsonic,
+    /// Cisco virtual router running as a KVM VM.
     Vcisco,
+    /// SONiC virtual switch running as a Docker container.
     Csonic,
 }
 
@@ -191,15 +261,26 @@ impl fmt::Display for VmType {
 // Reboot and operations
 // ---------------------------------------------------------------------------
 
+/// Method used to reboot a device under test.
+///
+/// Different reboot types exercise different SONiC subsystems. Tests select
+/// a reboot type to verify that services recover correctly under each method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RebootType {
+    /// Full power-off and restart. All state is lost.
     Cold,
+    /// Warm reboot that preserves the data plane during restart.
     Warm,
+    /// Fast reboot that minimizes control plane downtime.
     Fast,
+    /// Hard power cycle via PDU or BMC.
     PowerCycle,
+    /// Hardware watchdog timer expiry triggers the reboot.
     Watchdog,
+    /// Supervisor module restart on modular chassis.
     Supervisor,
+    /// Kernel crash dump followed by reboot.
     Kdump,
 }
 
@@ -217,12 +298,17 @@ impl fmt::Display for RebootType {
     }
 }
 
+/// Method used to reload device configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigReloadType {
+    /// Reload config_db.json from disk.
     Reload,
+    /// Load and apply a minigraph XML topology file.
     LoadMinigraph,
+    /// Apply the golden configuration template.
     GoldenConfig,
+    /// Erase all configuration and restore factory defaults.
     FactoryReset,
 }
 
@@ -230,14 +316,21 @@ pub enum ConfigReloadType {
 // Test result types
 // ---------------------------------------------------------------------------
 
+/// Final result of a single test case execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TestOutcome {
+    /// Test assertions succeeded.
     Passed,
+    /// One or more assertions failed.
     Failed,
+    /// Test was skipped (e.g., unsupported platform or topology).
     Skipped,
+    /// Test could not run due to an infrastructure error.
     Error,
+    /// Test failed as expected (known issue marked with `xfail`).
     XFail,
+    /// Test marked `xfail` passed unexpectedly.
     XPass,
 }
 
@@ -258,16 +351,28 @@ impl fmt::Display for TestOutcome {
 // Core data structures
 // ---------------------------------------------------------------------------
 
+/// Authentication credentials for connecting to a device.
+///
+/// Construct with [`Credentials::new`] and chain builder methods to add
+/// a password or SSH key path.
+///
+/// The `password` field is excluded from serialization to avoid leaking
+/// secrets into config files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credentials {
+    /// Login username.
     pub username: String,
+    /// Password for password-based authentication. Skipped during serialization.
     #[serde(skip_serializing)]
     pub password: Option<String>,
+    /// Filesystem path to an SSH private key.
     pub key_path: Option<String>,
+    /// Passphrase that unlocks the SSH private key, if encrypted.
     pub passphrase: Option<String>,
 }
 
 impl Credentials {
+    /// Creates credentials with the given username and no password or key.
     pub fn new(username: impl Into<String>) -> Self {
         Self {
             username: username.into(),
@@ -277,36 +382,58 @@ impl Credentials {
         }
     }
 
+    /// Sets the password for password-based authentication.
     pub fn with_password(mut self, password: impl Into<String>) -> Self {
         self.password = Some(password.into());
         self
     }
 
+    /// Sets the filesystem path to an SSH private key.
     pub fn with_key(mut self, key_path: impl Into<String>) -> Self {
         self.key_path = Some(key_path.into());
         self
     }
 }
 
+/// Complete identity and connection details for a managed device.
+///
+/// Construct with [`DeviceInfo::new`], which assigns a random [`Uuid`],
+/// defaults to SSH on port 22, and sets the platform to [`Platform::Unknown`].
+/// Populate remaining fields directly after construction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceInfo {
+    /// Unique identifier for this device instance.
     pub id: Uuid,
+    /// DNS hostname or inventory name.
     pub hostname: String,
+    /// Management IP address used for out-of-band access.
     pub mgmt_ip: IpAddr,
+    /// Classification that selects the host driver.
     pub device_type: DeviceType,
+    /// ASIC vendor platform.
     pub platform: Platform,
+    /// Hardware SKU string (e.g., `"Arista-7060CX-32S-C32"`).
     pub hwsku: String,
+    /// SONiC or NOS version string, if known.
     pub os_version: Option<String>,
+    /// Device serial number, if known.
     pub serial: Option<String>,
+    /// Device model name, if known.
     pub model: Option<String>,
+    /// Authentication credentials.
     pub credentials: Credentials,
+    /// Transport protocol for the primary management session.
     pub connection_type: ConnectionType,
+    /// TCP port for the primary management session.
     pub port: u16,
+    /// Console server details for out-of-band serial access.
     pub console_server: Option<ConsoleInfo>,
+    /// Arbitrary key-value pairs for testbed-specific data.
     pub metadata: HashMap<String, String>,
 }
 
 impl DeviceInfo {
+    /// Creates a new device with SSH on port 22 and [`Platform::Unknown`].
     pub fn new(
         hostname: impl Into<String>,
         mgmt_ip: IpAddr,
@@ -332,27 +459,39 @@ impl DeviceInfo {
     }
 }
 
+/// Connection details for a console server port.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsoleInfo {
+    /// Hostname or IP of the console server (e.g., conserver).
     pub server: String,
+    /// TCP port on the console server mapped to this device.
     pub port: u16,
+    /// Protocol used to reach the console server.
     pub protocol: ConnectionType,
 }
 
+/// Output captured from a remote command execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommandResult {
+    /// Standard output of the command.
     pub stdout: String,
+    /// Standard error of the command.
     pub stderr: String,
+    /// Process exit code. Zero indicates success.
     pub exit_code: i32,
+    /// Wall-clock time the command took to complete.
     pub duration: std::time::Duration,
+    /// The command string that was executed.
     pub command: String,
 }
 
 impl CommandResult {
+    /// Returns `true` if the command exited with code 0.
     pub fn success(&self) -> bool {
         self.exit_code == 0
     }
 
+    /// Splits stdout into lines.
     pub fn stdout_lines(&self) -> Vec<&str> {
         self.stdout.lines().collect()
     }
@@ -362,15 +501,24 @@ impl CommandResult {
 // Network primitives
 // ---------------------------------------------------------------------------
 
+/// Dual-stack IPv4/IPv6 address pair with associated prefixes.
+///
+/// Either address family may be absent. Use [`IpPair::v4_only`] or
+/// [`IpPair::dual_stack`] to construct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpPair {
+    /// IPv4 host address.
     pub ipv4: Option<Ipv4Addr>,
+    /// IPv6 host address.
     pub ipv6: Option<Ipv6Addr>,
+    /// IPv4 subnet containing the host address.
     pub ipv4_prefix: Option<Ipv4Network>,
+    /// IPv6 subnet containing the host address.
     pub ipv6_prefix: Option<Ipv6Network>,
 }
 
 impl IpPair {
+    /// Creates a pair with only an IPv4 address and prefix.
     pub fn v4_only(addr: Ipv4Addr, prefix: Ipv4Network) -> Self {
         Self {
             ipv4: Some(addr),
@@ -380,6 +528,7 @@ impl IpPair {
         }
     }
 
+    /// Creates a pair with both IPv4 and IPv6 addresses and prefixes.
     pub fn dual_stack(
         v4: Ipv4Addr,
         v4_prefix: Ipv4Network,
@@ -395,25 +544,40 @@ impl IpPair {
     }
 }
 
+/// Physical or logical port on a switch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortInfo {
+    /// SONiC interface name (e.g., `"Ethernet0"`).
     pub name: String,
+    /// Front-panel alias (e.g., `"fortyGigE0/0"`).
     pub alias: Option<String>,
+    /// Zero-based port index.
     pub index: u32,
+    /// Link speed in bits per second.
     pub speed: u64,
+    /// ASIC lane assignments.
     pub lanes: Vec<u32>,
+    /// Maximum transmission unit in bytes.
     pub mtu: u16,
+    /// Administratively configured status.
     pub admin_status: PortStatus,
+    /// Operational (link-level) status.
     pub oper_status: PortStatus,
+    /// Forward error correction mode, if configured.
     pub fec: Option<String>,
+    /// Auto-negotiation enabled, if configured.
     pub autoneg: Option<bool>,
 }
 
+/// Administrative or operational status of a port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PortStatus {
+    /// Port is up.
     Up,
+    /// Port is administratively or operationally down.
     Down,
+    /// Port hardware is not present (empty slot or unsupported transceiver).
     NotPresent,
 }
 
@@ -427,42 +591,64 @@ impl fmt::Display for PortStatus {
     }
 }
 
+/// VLAN configuration on a switch.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VlanInfo {
+    /// IEEE 802.1Q VLAN ID (1-4094).
     pub id: u16,
+    /// VLAN name (e.g., `"Vlan1000"`).
     pub name: String,
+    /// Ports assigned to this VLAN.
     pub members: Vec<VlanMember>,
+    /// IP addresses assigned to the VLAN SVI.
     pub ip_addresses: Vec<IpPair>,
+    /// DHCP relay server addresses.
     pub dhcp_servers: Vec<IpAddr>,
 }
 
+/// A port's membership in a VLAN.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VlanMember {
+    /// Interface name (e.g., `"Ethernet0"`).
     pub port: String,
+    /// Whether the port carries the VLAN tag on the wire.
     pub tagging_mode: TaggingMode,
 }
 
+/// IEEE 802.1Q tagging mode for a VLAN member port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaggingMode {
+    /// Frames carry the VLAN tag (trunk port).
     Tagged,
+    /// Frames are sent without a VLAN tag (access port).
     Untagged,
 }
 
+/// Link aggregation group (port channel) configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LagInfo {
+    /// LAG interface name (e.g., `"PortChannel0001"`).
     pub name: String,
+    /// Member port names.
     pub members: Vec<String>,
+    /// Minimum number of active links for the LAG to be operationally up.
     pub min_links: u32,
+    /// LACP negotiation mode.
     pub lacp_mode: LacpMode,
+    /// Administrative status of the LAG interface.
     pub admin_status: PortStatus,
 }
 
+/// LACP negotiation mode for a link aggregation group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LacpMode {
+    /// Actively sends LACP PDUs to negotiate aggregation.
     Active,
+    /// Responds to LACP PDUs but does not initiate.
     Passive,
+    /// Static aggregation with no LACP negotiation.
     On,
 }
 
@@ -470,28 +656,46 @@ pub enum LacpMode {
 // BGP types
 // ---------------------------------------------------------------------------
 
+/// BGP neighbor session state and counters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BgpNeighbor {
+    /// Neighbor's IP address (IPv4 or IPv6).
     pub address: IpAddr,
+    /// Neighbor's autonomous system number.
     pub remote_as: u32,
+    /// Local autonomous system number.
     pub local_as: u32,
+    /// Current BGP FSM state.
     pub state: BgpState,
+    /// Configured neighbor description string.
     pub description: Option<String>,
+    /// Negotiated hold time in seconds.
     pub hold_time: u32,
+    /// Negotiated keepalive interval in seconds.
     pub keepalive: u32,
+    /// Number of prefixes received from this neighbor.
     pub prefixes_received: u64,
+    /// Number of prefixes advertised to this neighbor.
     pub prefixes_sent: u64,
+    /// Timestamp when the session entered Established state.
     pub up_since: Option<DateTime<Utc>>,
 }
 
+/// BGP finite state machine states (RFC 4271 Section 8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BgpState {
+    /// No resources allocated; waiting for a start event.
     Idle,
+    /// TCP connection in progress.
     Connect,
+    /// Listening for an incoming TCP connection.
     Active,
+    /// OPEN message sent, waiting for peer OPEN.
     OpenSent,
+    /// OPEN received, waiting for KEEPALIVE or NOTIFICATION.
     OpenConfirm,
+    /// Session is up and exchanging UPDATE messages.
     Established,
 }
 
@@ -508,24 +712,38 @@ impl fmt::Display for BgpState {
     }
 }
 
+/// A single BGP route entry from the RIB.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BgpRoute {
+    /// IP prefix in CIDR notation (e.g., `"10.0.0.0/24"`).
     pub prefix: String,
+    /// Next-hop address for this route.
     pub next_hop: IpAddr,
+    /// Multi-exit discriminator (MED).
     pub metric: u32,
+    /// BGP local preference.
     pub local_pref: u32,
+    /// Sequence of AS numbers the route has traversed.
     pub as_path: Vec<u32>,
+    /// Origin attribute.
     pub origin: BgpOrigin,
+    /// BGP community strings attached to the route.
     pub communities: Vec<String>,
+    /// Whether the route passes validity checks.
     pub valid: bool,
+    /// Whether this route is the best path for the prefix.
     pub best: bool,
 }
 
+/// BGP ORIGIN path attribute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BgpOrigin {
+    /// Route originated from an IGP (most preferred).
     Igp,
+    /// Route originated from an EGP.
     Egp,
+    /// Route origin is unknown (least preferred).
     Incomplete,
 }
 
@@ -533,53 +751,85 @@ pub enum BgpOrigin {
 // ACL types
 // ---------------------------------------------------------------------------
 
+/// Access control list table bound to a set of ports.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AclTable {
+    /// Table name (e.g., `"DATAACL"`).
     pub name: String,
+    /// ACL classification type.
     pub table_type: AclTableType,
+    /// Pipeline stage where the ACL is applied.
     pub stage: AclStage,
+    /// Ports this table is bound to.
     pub ports: Vec<String>,
+    /// Ordered list of match-action rules.
     pub rules: Vec<AclRule>,
 }
 
+/// Classification type of an ACL table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum AclTableType {
+    /// IPv4 L3 ACL.
     L3,
+    /// IPv6 L3 ACL.
     L3V6,
+    /// Port mirroring ACL.
     Mirror,
+    /// DSCP-based mirroring ACL.
     MirrorDscp,
+    /// Priority flow control watchdog ACL.
     Pfcwd,
+    /// Control plane protection ACL.
     Ctrlplane,
 }
 
+/// Pipeline stage where an ACL table is applied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AclStage {
+    /// Applied to incoming packets.
     Ingress,
+    /// Applied to outgoing packets.
     Egress,
 }
 
+/// A single match-action rule within an ACL table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AclRule {
+    /// Rule name.
     pub name: String,
+    /// Priority (higher value = matched first).
     pub priority: u32,
+    /// Action to take on a match.
     pub action: AclAction,
+    /// Source IP or prefix to match.
     pub src_ip: Option<String>,
+    /// Destination IP or prefix to match.
     pub dst_ip: Option<String>,
+    /// Source L4 port or range to match.
     pub src_port: Option<String>,
+    /// Destination L4 port or range to match.
     pub dst_port: Option<String>,
+    /// IP protocol number or name.
     pub protocol: Option<String>,
+    /// Ethernet type to match (e.g., `"0x0800"` for IPv4).
     pub ether_type: Option<String>,
 }
 
+/// Action taken when an ACL rule matches a packet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum AclAction {
+    /// Allow the packet through.
     Forward,
+    /// Silently discard the packet.
     Drop,
+    /// Redirect the packet to a different port or next-hop.
     Redirect,
+    /// Mirror a copy of the ingress packet to an analyzer port.
     MirrorIngress,
+    /// Mirror a copy of the egress packet to an analyzer port.
     MirrorEgress,
 }
 
@@ -587,63 +837,102 @@ pub enum AclAction {
 // Facts aggregates
 // ---------------------------------------------------------------------------
 
+/// System-level facts collected from a device.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BasicFacts {
+    /// Device hostname.
     pub hostname: String,
+    /// Hardware SKU identifier.
     pub hwsku: String,
+    /// Platform string reported by the device.
     pub platform: String,
+    /// SONiC or NOS version string.
     pub os_version: String,
+    /// Chassis serial number.
     pub serial_number: String,
+    /// Device model name.
     pub model: String,
+    /// System base MAC address.
     pub mac_address: String,
+    /// System uptime in seconds.
     pub uptime: u64,
+    /// ASIC type string (e.g., `"Memory"`).
     pub asic_type: String,
+    /// Linux kernel version.
     pub kernel_version: String,
 }
 
+/// BGP facts collected from a device.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BgpFacts {
+    /// BGP router ID.
     pub router_id: String,
+    /// Local autonomous system number.
     pub local_as: u32,
+    /// Configured BGP neighbor sessions.
     pub neighbors: Vec<BgpNeighbor>,
+    /// IPv4 unicast routes in the BGP RIB.
     pub routes_ipv4: Vec<BgpRoute>,
+    /// IPv6 unicast routes in the BGP RIB.
     pub routes_ipv6: Vec<BgpRoute>,
 }
 
+/// Interface facts collected from a device.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InterfaceFacts {
+    /// Physical and breakout ports.
     pub ports: Vec<PortInfo>,
+    /// VLAN interfaces and their members.
     pub vlans: Vec<VlanInfo>,
+    /// Link aggregation groups.
     pub lags: Vec<LagInfo>,
+    /// Loopback interfaces.
     pub loopbacks: Vec<LoopbackInfo>,
 }
 
+/// Loopback interface and its assigned addresses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopbackInfo {
+    /// Interface name (e.g., `"Loopback0"`).
     pub name: String,
+    /// IP addresses assigned to the loopback.
     pub ip_addresses: Vec<IpPair>,
 }
 
+/// Configuration facts collected from a device.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ConfigFacts {
+    /// Running configuration tables keyed by SONiC config_db table name.
     pub running_config: HashMap<String, serde_json::Value>,
+    /// Startup configuration tables.
     pub startup_config: HashMap<String, serde_json::Value>,
+    /// SONiC feature states keyed by feature name.
     pub features: HashMap<String, FeatureState>,
+    /// Systemd service statuses.
     pub services: Vec<ServiceInfo>,
 }
 
+/// State of a SONiC feature (container-managed service).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeatureState {
+    /// Feature name (e.g., `"bgp"`, `"swss"`).
     pub name: String,
+    /// Current state string (e.g., `"enabled"`, `"disabled"`).
     pub state: String,
+    /// Whether the feature auto-restarts on failure.
     pub auto_restart: bool,
+    /// Whether high memory alerts are enabled.
     pub high_mem_alert: bool,
 }
 
+/// Status of a systemd service on the device.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceInfo {
+    /// Systemd unit name.
     pub name: String,
+    /// Service status (e.g., `"running"`, `"exited"`).
     pub status: String,
+    /// Main process ID, if running.
     pub pid: Option<u32>,
 }
 
@@ -651,14 +940,21 @@ pub struct ServiceInfo {
 // Testbed types
 // ---------------------------------------------------------------------------
 
+/// Lifecycle state of a testbed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TestbedState {
+    /// Testbed is idle and can accept new test runs.
     Available,
+    /// A test run is currently executing on this testbed.
     InUse,
+    /// Topology or VM deployment is in progress.
     Deploying,
+    /// An unrecoverable error occurred; manual intervention needed.
     Error,
+    /// Testbed is offline for planned maintenance.
     Maintenance,
+    /// Testbed resources have been torn down.
     Destroyed,
 }
 
@@ -675,12 +971,17 @@ impl fmt::Display for TestbedState {
     }
 }
 
+/// Result of a health check against a device or testbed component.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthStatus {
+    /// All checks passed.
     Healthy,
+    /// Some non-critical checks failed.
     Degraded,
+    /// Critical checks failed; the component cannot serve traffic.
     Unhealthy,
+    /// Health state could not be determined.
     Unknown,
 }
 
@@ -699,25 +1000,39 @@ impl fmt::Display for HealthStatus {
 // Report / analytics types
 // ---------------------------------------------------------------------------
 
+/// Output format for test result reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportFormat {
+    /// JUnit XML format consumed by CI systems.
     JunitXml,
+    /// JSON format.
     Json,
+    /// TOML format.
     Toml,
+    /// Comma-separated values.
     Csv,
+    /// HTML report for human viewing.
     Html,
 }
 
+/// Authentication method for result upload destinations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMethod {
+    /// Application key / API key.
     AppKey,
+    /// Azure managed identity.
     ManagedIdentity,
+    /// Azure default credential chain.
     AzureDefault,
+    /// Azure CLI cached credential.
     AzureCli,
+    /// OAuth device code flow.
     DeviceCode,
+    /// User-scoped bearer token.
     UserToken,
+    /// Application-scoped bearer token.
     AppToken,
 }
 

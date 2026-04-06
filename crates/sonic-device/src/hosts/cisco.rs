@@ -26,6 +26,7 @@ pub struct CiscoHost {
 }
 
 impl CiscoHost {
+    /// Creates a new Cisco host driver with a 5-minute facts cache TTL.
     pub fn new(info: DeviceInfo) -> Self {
         Self {
             info,

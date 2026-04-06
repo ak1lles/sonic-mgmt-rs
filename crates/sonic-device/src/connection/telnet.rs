@@ -37,8 +37,12 @@ struct TelnetInner {
 // Public struct
 // -----------------------------------------------------------------------
 
-/// A Telnet connection implemented on top of a raw TCP stream with minimal
-/// in-band telnet option negotiation.
+/// Telnet connection over a raw TCP stream with minimal in-band option
+/// negotiation (RFC 854/855).
+///
+/// Construct with [`TelnetConnection::new`] and optionally override the
+/// prompt regex or timeouts before calling
+/// [`open`](sonic_core::Connection::open).
 pub struct TelnetConnection {
     host: String,
     port: u16,
@@ -50,6 +54,10 @@ pub struct TelnetConnection {
 }
 
 impl TelnetConnection {
+    /// Creates a new, disconnected telnet connection descriptor.
+    ///
+    /// Defaults to a 30 s connect timeout, 120 s command timeout, and a
+    /// prompt regex matching lines ending in `$`, `#`, or `>`.
     pub fn new(host: impl Into<String>, port: u16, credentials: Credentials) -> Self {
         Self {
             host: host.into(),
@@ -63,16 +71,19 @@ impl TelnetConnection {
         }
     }
 
+    /// Overrides the shell prompt regex used to detect command completion.
     pub fn with_prompt(mut self, pattern: &str) -> Result<Self> {
         self.prompt = Regex::new(pattern)?;
         Ok(self)
     }
 
+    /// Overrides the TCP connect and login timeout (default 30 s).
     pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
         self.connect_timeout = timeout;
         self
     }
 
+    /// Overrides the per-command timeout (default 120 s).
     pub fn with_command_timeout(mut self, timeout: Duration) -> Self {
         self.command_timeout = timeout;
         self

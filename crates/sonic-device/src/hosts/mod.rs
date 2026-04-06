@@ -1,3 +1,17 @@
+//! Device host drivers.
+//!
+//! Each submodule implements [`sonic_core::Device`] and
+//! [`sonic_core::FactsProvider`] for a specific device type:
+//!
+//! - [`sonic`] -- SONiC switches (DUT).
+//! - [`eos`] -- Arista EOS neighbor VMs.
+//! - [`cisco`] -- Cisco IOS/NX-OS neighbor VMs.
+//! - [`fanout`] -- Fanout switches that break out ports to the DUT.
+//! - [`ptf`] -- Packet Test Framework containers.
+//!
+//! Use [`create_host`] to instantiate the correct driver from a
+//! [`DeviceInfo`].
+
 pub mod sonic;
 pub mod eos;
 pub mod fanout;
@@ -12,7 +26,10 @@ use self::fanout::FanoutHost;
 use self::ptf::PtfHost;
 use self::sonic::SonicHost;
 
-/// Factory: create the appropriate host type from a [`DeviceInfo`].
+/// Creates the appropriate host driver from a [`DeviceInfo`].
+///
+/// Dispatches on [`DeviceInfo::device_type`]. Unrecognized device types
+/// fall back to [`SonicHost`].
 pub fn create_host(info: DeviceInfo) -> Box<dyn sonic_core::Device> {
     match info.device_type {
         DeviceType::Sonic => Box::new(SonicHost::new(info)),

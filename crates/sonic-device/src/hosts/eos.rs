@@ -26,6 +26,7 @@ pub struct EosHost {
 }
 
 impl EosHost {
+    /// Creates a new EOS host driver with a 5-minute facts cache TTL.
     pub fn new(info: DeviceInfo) -> Self {
         Self {
             info,

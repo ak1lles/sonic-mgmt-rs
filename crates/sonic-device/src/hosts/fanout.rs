@@ -29,6 +29,7 @@ pub struct FanoutHost {
 }
 
 impl FanoutHost {
+    /// Creates a new fanout host driver with a 5-minute facts cache TTL.
     pub fn new(info: DeviceInfo) -> Self {
         Self {
             info,

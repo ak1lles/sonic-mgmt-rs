@@ -29,6 +29,7 @@ pub struct SonicHost {
 }
 
 impl SonicHost {
+    /// Creates a new SONiC host driver with a 5-minute facts cache TTL.
     pub fn new(info: DeviceInfo) -> Self {
         Self {
             info,
