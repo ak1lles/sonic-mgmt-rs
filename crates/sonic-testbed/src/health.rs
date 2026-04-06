@@ -11,7 +11,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
-use sonic_core::{DeviceInfo, HealthStatus, SonicError};
+use sonic_core::{Device, DeviceInfo, HealthStatus, SonicError};
+
+use crate::device_mgr::DeviceManager;
 
 // ---------------------------------------------------------------------------
 // Per-device health
@@ -291,6 +293,227 @@ impl HealthChecker {
     }
 }
 
+impl HealthChecker {
+    /// Checks device health over an active SSH connection.
+    ///
+    /// Runs `docker ps`, `show ip bgp summary`, `df`, and `free` to
+    /// populate the health record with real data from the device.
+    pub async fn check_device_connected(&self, device: &dyn Device) -> DeviceHealth {
+        let hostname = device.hostname().to_string();
+        info!(hostname = %hostname, "checking device health via live connection");
+
+        let start = std::time::Instant::now();
+
+        // Check if the connection is still alive.
+        if !device.is_connected().await {
+            warn!(hostname = %hostname, "device reports not connected");
+            return DeviceHealth::unreachable(&hostname);
+        }
+
+        let latency = start.elapsed().as_secs_f64() * 1000.0;
+
+        // Critical services via docker ps.
+        let critical_services = self.check_services(device).await;
+
+        // BGP session counts.
+        let (bgp_up, bgp_total) = self.check_bgp(device).await;
+
+        // Disk usage.
+        let disk_pct = self.check_disk(device).await;
+
+        // Memory usage.
+        let mem_pct = self.check_memory(device).await;
+
+        DeviceHealth {
+            hostname,
+            reachable: true,
+            ping_latency_ms: latency,
+            critical_services,
+            bgp_sessions_up: bgp_up,
+            bgp_sessions_total: bgp_total,
+            disk_usage_pct: disk_pct,
+            memory_usage_pct: mem_pct,
+        }
+    }
+
+    /// Checks every device, using live connections from the device manager
+    /// when available, falling back to TCP probes for disconnected devices.
+    pub async fn check_testbed_connected(
+        &self,
+        devices: &[DeviceInfo],
+        device_mgr: &DeviceManager,
+    ) -> sonic_core::Result<TestbedHealth> {
+        if devices.is_empty() {
+            return Err(SonicError::testbed("no devices to check"));
+        }
+
+        info!(
+            device_count = devices.len(),
+            "starting testbed health check (connected mode)"
+        );
+
+        let mut results = Vec::with_capacity(devices.len());
+
+        for device_info in devices {
+            let health = if let Some(dev) = device_mgr.get_device(&device_info.hostname) {
+                debug!(
+                    hostname = %device_info.hostname,
+                    "using live connection for health check"
+                );
+                self.check_device_connected(dev).await
+            } else {
+                debug!(
+                    hostname = %device_info.hostname,
+                    "no live connection, falling back to TCP probe"
+                );
+                self.check_device(device_info).await
+            };
+            results.push(health);
+        }
+
+        let overall = TestbedHealth::aggregate(&results);
+        info!(
+            overall = %overall,
+            devices_checked = results.len(),
+            "testbed health check complete"
+        );
+
+        Ok(TestbedHealth {
+            overall,
+            devices: results,
+            checked_at: Utc::now(),
+        })
+    }
+
+    // -- internal health probes -----------------------------------------------
+
+    /// Runs `docker ps` on the device and checks which critical containers
+    /// are running.
+    async fn check_services(&self, device: &dyn Device) -> HashMap<String, bool> {
+        let mut services = HashMap::new();
+
+        let cmd = "docker ps --format '{{.Names}} {{.Status}}'";
+        match device.execute(cmd).await {
+            Ok(result) => {
+                for svc in &self.critical_services {
+                    let running = result.stdout.lines().any(|line| {
+                        line.contains(svc) && line.contains("Up")
+                    });
+                    services.insert(svc.clone(), running);
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to check services via docker ps");
+                // Mark all as unknown (false) since we could not determine.
+                for svc in &self.critical_services {
+                    services.insert(svc.clone(), false);
+                }
+            }
+        }
+
+        services
+    }
+
+    /// Runs `show ip bgp summary` and parses established session counts.
+    async fn check_bgp(&self, device: &dyn Device) -> (u32, u32) {
+        let cmd = "show ip bgp summary";
+        match device.execute(cmd).await {
+            Ok(result) => {
+                let mut total = 0u32;
+                let mut established = 0u32;
+
+                for line in result.stdout.lines() {
+                    let fields: Vec<&str> = line.split_whitespace().collect();
+                    // BGP summary lines have the state/prefix-count as the last
+                    // field. A numeric value means established; anything else
+                    // (Idle, Active, Connect, OpenSent, etc.) means not up.
+                    if fields.len() >= 10 {
+                        total += 1;
+                        if let Some(last) = fields.last() {
+                            if last.parse::<u32>().is_ok() {
+                                established += 1;
+                            }
+                        }
+                    }
+                }
+                (established, total)
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to check BGP summary");
+                (0, 0)
+            }
+        }
+    }
+
+    /// Runs `df -h /` and parses disk usage percentage.
+    async fn check_disk(&self, device: &dyn Device) -> f32 {
+        let cmd = "df -h /";
+        match device.execute(cmd).await {
+            Ok(result) => parse_df_usage(&result.stdout),
+            Err(e) => {
+                warn!(error = %e, "failed to check disk usage");
+                0.0
+            }
+        }
+    }
+
+    /// Runs `free -m` and parses memory usage percentage.
+    async fn check_memory(&self, device: &dyn Device) -> f32 {
+        let cmd = "free -m";
+        match device.execute(cmd).await {
+            Ok(result) => parse_free_usage(&result.stdout),
+            Err(e) => {
+                warn!(error = %e, "failed to check memory usage");
+                0.0
+            }
+        }
+    }
+}
+
+/// Parses `df -h /` output and returns the usage percentage.
+///
+/// Expected format:
+/// ```text
+/// Filesystem      Size  Used Avail Use% Mounted on
+/// /dev/sda1        50G   20G   30G  40% /
+/// ```
+fn parse_df_usage(output: &str) -> f32 {
+    for line in output.lines().skip(1) {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        // The Use% column is typically the 5th field (index 4).
+        if fields.len() >= 5 {
+            let pct_str = fields[4].trim_end_matches('%');
+            if let Ok(pct) = pct_str.parse::<f32>() {
+                return pct;
+            }
+        }
+    }
+    0.0
+}
+
+/// Parses `free -m` output and returns memory usage percentage.
+///
+/// Expected format:
+/// ```text
+///               total        used        free      shared  buff/cache   available
+/// Mem:           7983        3500        1200         150        3283        4100
+/// ```
+fn parse_free_usage(output: &str) -> f32 {
+    for line in output.lines() {
+        if line.starts_with("Mem:") {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() >= 3 {
+                let total: f32 = fields[1].parse().unwrap_or(0.0);
+                let used: f32 = fields[2].parse().unwrap_or(0.0);
+                if total > 0.0 {
+                    return (used / total) * 100.0;
+                }
+            }
+        }
+    }
+    0.0
+}
+
 impl Default for HealthChecker {
     fn default() -> Self {
         Self::new()
@@ -362,5 +585,33 @@ mod tests {
     #[test]
     fn aggregate_empty_is_unknown() {
         assert_eq!(TestbedHealth::aggregate(&[]), HealthStatus::Unknown);
+    }
+
+    #[test]
+    fn parse_df_basic() {
+        let output = "\
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1        50G   20G   30G  40% /";
+        assert!((parse_df_usage(output) - 40.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn parse_df_empty() {
+        assert!((parse_df_usage("") - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn parse_free_basic() {
+        let output = "\
+              total        used        free      shared  buff/cache   available
+Mem:           8000        4000        2000         100        1900        3800
+Swap:          2048           0        2048";
+        let pct = parse_free_usage(output);
+        assert!((pct - 50.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn parse_free_empty() {
+        assert!((parse_free_usage("") - 0.0).abs() < f32::EPSILON);
     }
 }

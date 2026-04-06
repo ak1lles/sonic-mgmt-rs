@@ -11,13 +11,14 @@ use std::net::IpAddr;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use sonic_core::{
-    Credentials, DeviceInfo, DeviceType, HealthStatus, Platform, SonicError,
+    CommandResult, Credentials, DeviceInfo, DeviceType, HealthStatus, Platform, SonicError,
     TestbedManager, TestbedState, TopologyDefinition, TopologyGenerator, TopologyType,
 };
 
+use crate::device_mgr::DeviceManager;
 use crate::health::HealthChecker;
 
 // ---------------------------------------------------------------------------
@@ -137,6 +138,8 @@ pub struct Testbed {
     /// Server hosting the VMs.
     #[allow(dead_code)]
     server: Option<DeviceInfo>,
+    /// Live SSH/Telnet connections to testbed devices.
+    device_mgr: DeviceManager,
     /// When the testbed was created.
     created_at: DateTime<Utc>,
     /// When the state last changed.
@@ -272,6 +275,7 @@ impl Testbed {
             links,
             ptf,
             server,
+            device_mgr: DeviceManager::new(),
             created_at: now,
             updated_at: now,
         })
@@ -411,6 +415,68 @@ impl Testbed {
         names
     }
 
+    // -- device connection management ----------------------------------------
+
+    /// Connects to all devices in the testbed (DUTs, neighbors, fanouts, PTF).
+    pub async fn connect_all(&mut self) -> sonic_core::Result<()> {
+        info!(testbed = %self.name, "connecting to all devices");
+
+        let infos: Vec<DeviceInfo> = self
+            .devices
+            .values()
+            .cloned()
+            .chain(self.fanouts.values().cloned())
+            .chain(self.ptf.clone())
+            .collect();
+
+        for info in &infos {
+            if let Err(e) = self.device_mgr.connect_device(info).await {
+                warn!(
+                    hostname = %info.hostname,
+                    error = %e,
+                    "failed to connect device, continuing with remaining"
+                );
+            }
+        }
+
+        info!(
+            testbed = %self.name,
+            connected = self.device_mgr.connected_hosts().len(),
+            total = infos.len(),
+            "device connections established"
+        );
+        Ok(())
+    }
+
+    /// Disconnects all connected devices.
+    pub async fn disconnect_all(&mut self) -> sonic_core::Result<()> {
+        info!(testbed = %self.name, "disconnecting all devices");
+        self.device_mgr.disconnect_all().await
+    }
+
+    /// Executes a command on a connected DUT.
+    ///
+    /// Returns an error if the hostname is not a DUT or is not connected.
+    pub async fn execute_on_dut(
+        &self,
+        hostname: &str,
+        cmd: &str,
+    ) -> sonic_core::Result<CommandResult> {
+        // Verify it is a DUT.
+        self.get_dut(hostname)?;
+        self.device_mgr.execute_on(hostname, cmd).await
+    }
+
+    /// Returns a reference to the underlying device manager.
+    pub fn device_manager(&self) -> &DeviceManager {
+        &self.device_mgr
+    }
+
+    /// Returns a mutable reference to the underlying device manager.
+    pub fn device_manager_mut(&mut self) -> &mut DeviceManager {
+        &mut self.device_mgr
+    }
+
     // -- internal -----------------------------------------------------------
 
     fn touch(&mut self) {
@@ -493,6 +559,9 @@ impl TestbedManager for Testbed {
 
     /// Runs a health check across all devices and returns the aggregate
     /// status.
+    ///
+    /// If devices are connected via the device manager, runs SSH-based
+    /// health checks for richer data. Otherwise falls back to TCP probes.
     async fn health_check(&self) -> sonic_core::Result<HealthStatus> {
         info!(testbed = %self.name, "health check requested");
 
@@ -509,7 +578,9 @@ impl TestbedManager for Testbed {
             return Ok(HealthStatus::Unknown);
         }
 
-        let health = checker.check_testbed(&all_devices).await?;
+        let health = checker
+            .check_testbed_connected(&all_devices, &self.device_mgr)
+            .await?;
         info!(overall = %health.overall, "health check complete");
         Ok(health.overall)
     }

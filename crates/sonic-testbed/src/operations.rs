@@ -136,13 +136,49 @@ impl TestbedOps {
             "minigraph rendered, pushing to DUT(s)"
         );
 
-        // In production:
-        //   for dut in testbed.get_all_duts() {
-        //       scp minigraph_xml -> /etc/sonic/minigraph.xml
-        //       ssh dut "config load_minigraph -y"
-        //   }
+        let dut_hostnames: Vec<String> = testbed
+            .get_all_duts()
+            .iter()
+            .map(|d| d.hostname.clone())
+            .collect();
 
-        info!(testbed = %testbed.name(), "minigraph deployed (simulated)");
+        for hostname in &dut_hostnames {
+            if !testbed.device_manager().is_connected(hostname) {
+                warn!(
+                    dut = %hostname,
+                    "DUT not connected, skipping minigraph push"
+                );
+                continue;
+            }
+
+            // Write the minigraph XML to /etc/sonic/minigraph.xml via heredoc.
+            let write_cmd = format!(
+                "cat > /etc/sonic/minigraph.xml << 'XMLEOF'\n{}\nXMLEOF",
+                minigraph_xml
+            );
+            info!(dut = %hostname, "writing minigraph to device");
+            if let Err(e) = testbed.device_manager().execute_on(hostname, &write_cmd).await {
+                error!(dut = %hostname, error = %e, "failed to write minigraph");
+                return Err(e);
+            }
+
+            // Apply the minigraph configuration.
+            info!(dut = %hostname, "loading minigraph configuration");
+            if let Err(e) = testbed
+                .device_manager()
+                .execute_on(hostname, "sudo config load_minigraph -y")
+                .await
+            {
+                error!(dut = %hostname, error = %e, "config load_minigraph failed");
+                return Err(e);
+            }
+
+            // Allow time for config to apply.
+            debug!(dut = %hostname, "waiting for config to apply");
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+
+        info!(testbed = %testbed.name(), "minigraph deployed");
         Ok(())
     }
 
@@ -156,14 +192,21 @@ impl TestbedOps {
         }
 
         for dut in &duts {
-            debug!(dut = %dut.hostname, "issuing config reload");
-            // In production: ssh dut "sudo config reload -y"
+            if !testbed.device_manager().is_connected(&dut.hostname) {
+                warn!(dut = %dut.hostname, "DUT not connected, skipping config reload");
+                continue;
+            }
+            info!(dut = %dut.hostname, "issuing config reload");
+            testbed
+                .device_manager()
+                .execute_on(&dut.hostname, "sudo config reload -y")
+                .await?;
         }
 
         info!(
             testbed = %testbed.name(),
             dut_count = duts.len(),
-            "DUT config reloaded (simulated)"
+            "DUT config reloaded"
         );
         Ok(())
     }
@@ -179,15 +222,12 @@ impl TestbedOps {
             return Err(SonicError::testbed("no devices in testbed"));
         }
 
-        for hostname in &all_devices {
-            debug!(hostname = %hostname, "opening connection (simulated)");
-            // In production: open SSH session via sonic_device::SshConnection
-        }
+        testbed.connect_all().await?;
 
         info!(
             testbed = %testbed.name(),
-            connected = all_devices.len(),
-            "all device connections established (simulated)"
+            connected = testbed.device_manager().connected_hosts().len(),
+            "device connections established"
         );
         Ok(())
     }
@@ -195,17 +235,8 @@ impl TestbedOps {
     /// Tears down management connections to all devices.
     pub async fn disconnect_devices(testbed: &mut Testbed) -> sonic_core::Result<()> {
         info!(testbed = %testbed.name(), "disconnecting devices");
-
-        let all_devices = testbed.all_device_names();
-        for hostname in &all_devices {
-            debug!(hostname = %hostname, "closing connection (simulated)");
-        }
-
-        info!(
-            testbed = %testbed.name(),
-            disconnected = all_devices.len(),
-            "all device connections closed (simulated)"
-        );
+        testbed.disconnect_all().await?;
+        info!(testbed = %testbed.name(), "all device connections closed");
         Ok(())
     }
 
@@ -216,8 +247,8 @@ impl TestbedOps {
     /// Steps:
     /// 1. Download the image to each DUT.
     /// 2. Install the image.
-    /// 3. Set it as the next-boot image.
-    /// 4. Reboot and wait for the DUT to come back up.
+    /// 3. Reboot and wait for the DUT to come back up.
+    /// 4. Reconnect.
     pub async fn upgrade_sonic(
         testbed: &mut Testbed,
         image_url: &str,
@@ -228,34 +259,85 @@ impl TestbedOps {
             "upgrading SONiC image"
         );
 
-        let dut_hostnames: Vec<String> = testbed
+        let dut_infos: Vec<sonic_core::DeviceInfo> = testbed
             .get_all_duts()
             .iter()
-            .map(|d| d.hostname.clone())
+            .map(|d| (*d).clone())
             .collect();
-        if dut_hostnames.is_empty() {
+        if dut_infos.is_empty() {
             return Err(SonicError::testbed("no DUTs to upgrade"));
         }
 
         testbed.set_state(TestbedState::Maintenance);
 
-        for hostname in &dut_hostnames {
-            info!(dut = %hostname, "downloading image (simulated)");
-            // ssh dut "curl -o /tmp/sonic.bin $image_url"
+        for info in &dut_infos {
+            let hostname = &info.hostname;
 
-            info!(dut = %hostname, "installing image (simulated)");
-            // ssh dut "sudo sonic-installer install /tmp/sonic.bin -y"
+            if !testbed.device_manager().is_connected(hostname) {
+                warn!(dut = %hostname, "DUT not connected, skipping upgrade");
+                continue;
+            }
 
-            info!(dut = %hostname, "rebooting (simulated)");
-            // ssh dut "sudo reboot"
-            // wait_ready(dut, 300)
+            // Download the image.
+            let download_cmd = format!("curl -o /tmp/sonic.bin {image_url}");
+            info!(dut = %hostname, "downloading image");
+            testbed
+                .device_manager()
+                .execute_on(hostname, &download_cmd)
+                .await?;
+
+            // Install the image.
+            info!(dut = %hostname, "installing image");
+            testbed
+                .device_manager()
+                .execute_on(hostname, "sudo sonic-installer install /tmp/sonic.bin -y")
+                .await?;
+
+            // Reboot. The execute call may return an error because the
+            // connection drops during reboot -- that is expected.
+            info!(dut = %hostname, "rebooting");
+            let _ = testbed
+                .device_manager()
+                .execute_on(hostname, "sudo reboot")
+                .await;
+
+            // Disconnect the now-dead session.
+            testbed
+                .device_manager_mut()
+                .disconnect_device(hostname)
+                .await?;
+
+            // Wait for the DUT to come back online via TCP probe loop.
+            info!(dut = %hostname, "waiting for DUT to come back up");
+            let checker = crate::health::HealthChecker::new()
+                .with_timeout(std::time::Duration::from_secs(10))
+                .with_retries(30)
+                .with_retry_delay(std::time::Duration::from_secs(10));
+            let health = checker.check_device(info).await;
+            if !health.reachable {
+                error!(
+                    dut = %hostname,
+                    "DUT did not come back after reboot"
+                );
+                testbed.set_state(TestbedState::Error);
+                return Err(SonicError::testbed(format!(
+                    "DUT {hostname} did not come back after reboot"
+                )));
+            }
+
+            // Reconnect.
+            info!(dut = %hostname, "reconnecting after reboot");
+            testbed
+                .device_manager_mut()
+                .connect_device(info)
+                .await?;
         }
 
         testbed.set_state(TestbedState::Available);
         info!(
             testbed = %testbed.name(),
-            duts_upgraded = dut_hostnames.len(),
-            "SONiC upgrade complete (simulated)"
+            duts_upgraded = dut_infos.len(),
+            "SONiC upgrade complete"
         );
         Ok(())
     }
@@ -306,10 +388,23 @@ impl TestbedOps {
                 count = unreachable.len(),
                 "unreachable devices found, attempting reconnection"
             );
-            // In production: for each unreachable device attempt SSH reconnect,
-            // potentially with console fallback.
-            for dev in &unreachable {
-                debug!(hostname = %dev.hostname, "reconnection attempt (simulated)");
+            for dev_health in &unreachable {
+                // Look up the DeviceInfo for this hostname.
+                if let Some(info) = devices.iter().find(|d| d.hostname == dev_health.hostname) {
+                    debug!(hostname = %dev_health.hostname, "attempting reconnection");
+                    match testbed.device_manager_mut().connect_device(info).await {
+                        Ok(()) => {
+                            info!(hostname = %dev_health.hostname, "reconnected successfully");
+                        }
+                        Err(e) => {
+                            warn!(
+                                hostname = %dev_health.hostname,
+                                error = %e,
+                                "reconnection failed"
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -340,7 +435,7 @@ impl TestbedOps {
 
     // -- internal helpers ---------------------------------------------------
 
-    /// Triggers BGP route announcement on neighbor VMs.
+    /// Triggers BGP route announcement on neighbor VMs by restarting ExaBGP.
     async fn announce_routes(testbed: &Testbed) -> sonic_core::Result<()> {
         let neighbors = testbed.get_neighbors();
         if neighbors.is_empty() {
@@ -355,11 +450,25 @@ impl TestbedOps {
         );
 
         for nbr in &neighbors {
-            debug!(
-                neighbor = %nbr.hostname,
-                "announcing routes from neighbor (simulated)"
-            );
-            // In production: ssh nbr "exabgp announce ..."
+            if !testbed.device_manager().is_connected(&nbr.hostname) {
+                debug!(
+                    neighbor = %nbr.hostname,
+                    "neighbor not connected, skipping route announcement"
+                );
+                continue;
+            }
+            debug!(neighbor = %nbr.hostname, "restarting ExaBGP for route announcement");
+            if let Err(e) = testbed
+                .device_manager()
+                .execute_on(&nbr.hostname, "supervisorctl restart exabgp")
+                .await
+            {
+                warn!(
+                    neighbor = %nbr.hostname,
+                    error = %e,
+                    "ExaBGP restart failed, continuing with remaining neighbors"
+                );
+            }
         }
 
         Ok(())

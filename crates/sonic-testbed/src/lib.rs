@@ -10,11 +10,13 @@
 //! - **operations**: high-level orchestration commands (add/remove topology,
 //!   deploy minigraph, upgrade SONiC, recover testbed).
 
+pub mod device_mgr;
 pub mod health;
 pub mod inventory;
 pub mod manager;
 pub mod operations;
 
+pub use device_mgr::DeviceManager;
 pub use health::{DeviceHealth, HealthChecker, TestbedHealth};
 pub use inventory::{DeviceEntry, InventoryManager};
 pub use manager::{
